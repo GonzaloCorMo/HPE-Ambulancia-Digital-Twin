@@ -13,18 +13,21 @@ class MechanicalEngine:
         self.broken = False
         self.is_refueling = False
 
-    def step(self, dt=1.0):
+    def step(self, dt=1.0, distance_km=0.0):
         if self.broken:
             return self.get_state()
             
         if self.is_refueling:
-            self.fuel_level = min(100.0, self.fuel_level + (10.0 * dt))
+            self.fuel_level = min(100.0, self.fuel_level + (15.0 * dt))
             if self.fuel_level >= 100.0:
                 self.is_refueling = False
         else:
-            self.fuel_level = max(0.0, self.fuel_level - (0.05 * dt))
-            if self.fuel_level < 5.0 and not self.broken:
-                self.is_refueling = True
+            # Brutal realism: highly dependent on distance travelled
+            consumption = (5.0 * distance_km) + (0.05 * dt)
+            self.fuel_level = max(0.0, self.fuel_level - consumption)
+            if self.fuel_level < 1.0 and not self.broken:
+                self.broken = True # completely out of fuel
+                self.fuel_level = 0.0
                 
         self.battery_level = max(0.0, self.battery_level - (0.01 * dt))
         

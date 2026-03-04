@@ -42,15 +42,37 @@ class AmbulanceTwin:
         last_https_sync = time.time()
         
         while self.running:
-            # 1. Step simulations (dt = 1.0 second)
-            mech_state = self.mechanical.step(dt=1.0)
-            vit_state = self.vitals.step(dt=1.0)
+            # 1. Step Logistics and get metrics
+            log_state = self.logistics.step(dt=1.0)
+            dist_km = self.logistics.last_distance_km
             
+            # ORCHESTRATION: Smart fuel management
+            if self.mechanical.fuel_level < 15.0 and not self.mechanical.is_refueling:
+                if self.logistics.destination_type != "GAS_STATION":
+                    self.logistics.route_to_nearest("GAS_STATION")
+                    if self.log_callback:
+                        self.log_callback(f"[{self.id}] ⚠️ Combustible bajo ({int(self.mechanical.fuel_level)}%). Desviando a ⛽...")
+                        
+            if self.logistics.destination is None and self.logistics.destination_type == "GAS_STATION":
+                # Arrived at Gas Station
+                self.mechanical.is_refueling = True
+                self.logistics.destination_type = None
+                
             if self.mechanical.is_refueling:
                 self.logistics.speed = 0.0
                 self.logistics.acceleration = 0.0
+                if self.mechanical.fuel_level >= 99.0:
+                    # Finished Refueling
+                    self.log_callback(f"[{self.id}] ⛽ Depósito Lleno. Retomando operaciones.")
+                    self.logistics.route_to_nearest("HOSPITAL")
 
-            log_state = self.logistics.step(dt=1.0)
+            # Orchestration: Out of fuel
+            if self.mechanical.fuel_level <= 0.0:
+                 self.logistics.speed = 0.0
+                 self.logistics.acceleration = 0.0
+
+            mech_state = self.mechanical.step(dt=1.0, distance_km=dist_km)
+            vit_state = self.vitals.step(dt=1.0)
             
             # 2. Aggregate State
             self.current_state = {
