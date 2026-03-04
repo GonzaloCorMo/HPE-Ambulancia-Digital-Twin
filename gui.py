@@ -50,9 +50,10 @@ class SimulatorGUI:
         ttk.Button(self.ctrl_frame, text="🛞 Fallo Mecánico", command=self.inject_mechanical).grid(row=0, column=3, padx=5, pady=5)
         ttk.Button(self.ctrl_frame, text="Pausar MQTT", command=self.cut_mqtt).grid(row=1, column=1, padx=5, pady=5)
         ttk.Button(self.ctrl_frame, text="💥 Tirar Centralita Abajo", command=self.kill_centralita).grid(row=1, column=2, padx=5, pady=5)
+        ttk.Button(self.ctrl_frame, text="🌐 Aislar HTTP (Caída Total)", command=self.isolate_http).grid(row=1, column=3, padx=5, pady=5)
         
         # Network Log Dashboard
-        self.log_frame = ttk.LabelFrame(self.root, text="Monitor de Red P2P y MQTT")
+        self.log_frame = ttk.LabelFrame(self.root, text="Monitor de Red P2P, MQTT y HTTP backup")
         self.log_frame.pack(fill="both", expand=True, padx=20, pady=10)
         
         self.log_text = tk.Text(self.log_frame, height=8, bg="#1e1e1e", fg="#00ff00", font=("Courier", 9))
@@ -181,6 +182,14 @@ class SimulatorGUI:
             if amb.mqtt_client:
                 amb.mqtt_client.disconnect()
         messagebox.showerror("Fallo Crítico", "La centralita ha caído. Todas las ambulancias pasan a modo P2P.")
+
+    def isolate_http(self):
+        for amb in self.ambulances.values():
+            if amb.mqtt_client:
+                amb.mqtt_client.disconnect()
+            amb.p2p_enabled = False
+        messagebox.showerror("Corte de Comunicaciones", "Se han tirado las redes MQTT y P2P. Las ambulancias solo pueden comunicarse por HTTP.")
+        self.log_network("--- MODO DE EMERGENCIA HTTP AISLADO ---")
 
     def show_telemetry_details(self, am_id):
         if am_id not in self.ambulances:

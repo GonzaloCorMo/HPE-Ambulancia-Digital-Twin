@@ -16,7 +16,7 @@ def launch_ambulance(am_id, start_lat, start_lon, broker_url, log_callback=None)
     
     # Inyectar dependencias de comunicación
     twin.mqtt_client = MQTTHandler(broker=broker_url, log_callback=log_callback)
-    twin.https_client = HTTPSHandler(base_url="http://localhost:8000")
+    twin.https_client = HTTPSHandler(base_url="http://localhost:8000", log_callback=log_callback)
     twin.p2p_mesh = P2PMeshHandler(port=5005, log_callback=log_callback) # Todos usan el mismo puerto UDP para broadcast
     
     # Encender módulos de red

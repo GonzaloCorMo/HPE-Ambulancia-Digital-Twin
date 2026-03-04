@@ -40,7 +40,14 @@ class MechanicalEngine:
         return self.get_state()
 
     def get_state(self):
+        status = "OK"
+        if self.broken or self.fuel_level < 5.0:
+            status = "CRITICAL"
+        elif self.fuel_level < 20.0 or self.engine_temperature > 105.0 or self.oil_pressure < 30.0:
+            status = "WARNING"
+            
         return {
+            "status": status,
             "fuel_level": round(self.fuel_level, 2),
             "tire_pressure": [round(p, 2) for p in self.tire_pressure],
             "engine_temperature": round(self.engine_temperature, 2),

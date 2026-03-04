@@ -23,6 +23,8 @@ class AmbulanceTwin:
         
         # Store latest state
         self.current_state = {}
+        self.p2p_enabled = True
+        self.http_enabled = True
 
     def start(self):
         self.running = True
@@ -59,22 +61,29 @@ class AmbulanceTwin:
                 "logistics": log_state
             }
             
+            m_stat = mech_state.get('status', 'OK')
+            v_stat = vit_state.get('patient_status', 'stable')
+            l_stat = log_state.get('traffic_status', 'clear')
+            compact_log = f"Mech:{m_stat} | Vit:{v_stat} | Trf:{l_stat}"
+
             # 3. Communications
             if self.mqtt_client and self.mqtt_client.is_connected():
                 if self.log_callback:
-                    self.log_callback(f"[{self.id}] \u2192 MQTT: Publishing State")
+                    self.log_callback(f"[{self.id}] \u2192 MQTT | {compact_log}")
                 self.mqtt_client.publish_state(self.id, self.current_state)
                 
             # 3b. Fallback to P2P if MQTT is down
-            elif self.p2p_mesh:
+            elif self.p2p_mesh and self.p2p_enabled:
                 if self.log_callback:
-                    self.log_callback(f"[{self.id}] \u2192 P2P BROADCAST: State Fallback")
+                    self.log_callback(f"[{self.id}] \u2192 P2P BROADCAST | {compact_log}")
                 self.p2p_mesh.broadcast_state(self.current_state)
 
             # 4. HTTPS Backup (Every 10 seconds)
             current_time = time.time()
-            if current_time - last_https_sync >= 10.0:
+            if current_time - last_https_sync >= 10.0 and self.http_enabled:
                 if self.https_client:
+                    if self.log_callback:
+                        self.log_callback(f"[{self.id}] \u2192 HTTP | Starting Backup Data Sync...")
                     self.https_client.sync_backup(self.current_state)
                 last_https_sync = current_time
 
