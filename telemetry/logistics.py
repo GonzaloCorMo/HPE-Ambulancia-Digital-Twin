@@ -25,10 +25,26 @@ class LogisticsEngine:
         self.road_type = "urban"
         self.last_distance_km = 0.0
         self.mission_status = "ACTIVE" # ACTIVE, IN_USE, INACTIVE
+        self.route_geometry = []
+        self.route_step = 0
         
     def set_destination(self, lat, lon, dest_type="HOSPITAL"):
         self.destination = (lat, lon)
         self.destination_type = dest_type
+        self.route_geometry = []
+        self.route_step = 0
+        try:
+            import urllib.request, json
+            url = f"https://router.project-osrm.org/route/v1/driving/{self.lon},{self.lat};{lon},{lat}?overview=full&geometries=geojson"
+            req = urllib.request.Request(url, headers={'User-Agent': 'AmbulanceTwin/1.0'})
+            with urllib.request.urlopen(req, timeout=2) as response:
+                data = json.loads(response.read().decode())
+                if data.get("routes") and len(data["routes"]) > 0:
+                    coords = data["routes"][0]["geometry"]["coordinates"]
+                    self.route_geometry = [(c[1], c[0]) for c in coords] # Store as (lat, lon)
+        except Exception as e:
+            print(f"OSRM Route fetch error: {e}")
+            self.route_geometry = [(self.lat, self.lon), (lat, lon)]
 
     def route_to_nearest(self, dest_type):
         best, min_d = None, 999999
@@ -75,10 +91,10 @@ class LogisticsEngine:
                 if random.random() < 0.2 * adjusted_dt: # 20% chance per second to realize and detour
                     self.route_to_alternative("HOSPITAL")
 
-        if self.destination:
-            dest_lat, dest_lon = self.destination
-            d_lon = dest_lon - self.lon
-            d_lat = dest_lat - self.lat
+        if self.destination and getattr(self, "route_geometry", None) and getattr(self, "route_step", 0) < len(self.route_geometry):
+            target_lat, target_lon = self.route_geometry[self.route_step]
+            d_lon = target_lon - self.lon
+            d_lat = target_lat - self.lat
             self.heading = math.degrees(math.atan2(d_lon, d_lat))
             
             if self.speed < target_speed:
@@ -88,10 +104,13 @@ class LogisticsEngine:
                 self.speed = max(target_speed, self.speed - (5.0 * adjusted_dt * 3.6))
                 
             distance_to_dest = math.sqrt(d_lat**2 + d_lon**2)
-            if distance_to_dest < 0.006: # Increased to accommodate high speed multipliers
-                self.speed = 0.0
-                self.destination = None
-                self.lat, self.lon = dest_lat, dest_lon # Snap exactly to target instantly
+            if distance_to_dest < 0.005: # reached local node
+                self.route_step += 1
+                if self.route_step >= len(self.route_geometry):
+                    self.speed = 0.0
+                    self.destination = None
+                    self.lat, self.lon = target_lat, target_lon # Snap exactly to target instantly
+                    self.route_geometry = []
         else:
             self.acceleration = 0.0
             self.speed = max(0, self.speed - 5.0 * adjusted_dt)
@@ -116,6 +135,8 @@ class LogisticsEngine:
             "heading": round(self.heading, 2),
             "acceleration": round(self.acceleration, 2),
             "has_destination": self.destination is not None,
+            "destination_lat": round(self.destination[0], 6) if self.destination else None,
+            "destination_lon": round(self.destination[1], 6) if self.destination else None,
             "destination_type": self.destination_type,
             "traffic_status": traffic_status,
             "road_type": self.road_type,

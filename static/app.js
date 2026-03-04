@@ -10,149 +10,199 @@ let simState = {
     speed_multiplier: 1
 };
 
-// Map Constants for Madrid bounded box
-const MIN_LAT = 40.4000, MAX_LAT = 40.5000;
-const MIN_LON = -3.7500, MAX_LON = -3.6000;
+// Leaflet Map Setup
+const map = L.map('tactical-map').setView([40.4500, -3.6800], 13);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager_labels_under/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    subdomains: 'abcd',
+    maxZoom: 20
+}).addTo(map);
 
-// Canvas Setup
-const canvas = document.getElementById('tactical-map');
-const ctx = canvas.getContext('2d');
-let cw = 0, ch = 0;
+// Marker References dictionaries
+const markerRefs = {
+    ambulances: {},
+    emergencies: {},
+    pois: {},
+    jams: {}
+};
 
-function resizeCanvas() {
-    // High DPI Canvas support
-    const rect = canvas.parentElement.getBoundingClientRect();
-    canvas.width = rect.width * window.devicePixelRatio;
-    canvas.height = rect.height * window.devicePixelRatio;
-    cw = canvas.width;
-    ch = canvas.height;
-    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-    cw /= window.devicePixelRatio;
-    ch /= window.devicePixelRatio;
-}
-
-window.addEventListener('resize', resizeCanvas);
-resizeCanvas(); // Initial call
-
-// Coordinate math
-function coordToPixel(lat, lon) {
-    const x = (lon - MIN_LON) / (MAX_LON - MIN_LON) * cw;
-    const y = ch - ((lat - MIN_LAT) / (MAX_LAT - MIN_LAT) * ch);
-    return { x, y };
-}
-
-function pixelToCoord(px, py) {
-    const lon = (px / cw) * (MAX_LON - MIN_LON) + MIN_LON;
-    const lat = MAX_LAT - (py / ch) * (MAX_LAT - MIN_LAT);
-    return { lat, lon };
-}
+let predictiveLinesLayer = L.layerGroup().addTo(map);
+const activeRoutes = {}; // Stores L.geoJSON layers for each ambulance ID
+const routeCache = {};   // Stores raw GeoJSON objects to prevent duplicate fetches
 
 // -------------------------------------------------------------
-// Drawing Loop
+// Drawing Logic (State sync based)
 // -------------------------------------------------------------
-function drawLoop() {
-    ctx.clearRect(0, 0, cw, ch);
-
-    // 1. Grid
-    ctx.strokeStyle = '#E2E8F0'; // Slate 200
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    for (let i = 0; i < cw; i += 40) { ctx.moveTo(i, 0); ctx.lineTo(i, ch); }
-    for (let i = 0; i < ch; i += 40) { ctx.moveTo(0, i); ctx.lineTo(cw, i); }
-    ctx.stroke();
-    ctx.setLineDash([]); // Reset
-
-    // 2. Highways (Predictive connecting between all POIS/JAMS < 300px dist)
-    const showLines = document.getElementById('chk-lines') ? document.getElementById('chk-lines').checked : true;
-    if (showLines) {
-        const nodes = [...simState.pois.map(p => coordToPixel(p.lat, p.lon)), ...simState.jams.map(j => coordToPixel(j.lat, j.lon))];
-        ctx.strokeStyle = '#94A3B8'; // Slate 400
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        for (let i = 0; i < nodes.length; i++) {
-            for (let j = i + 1; j < nodes.length; j++) {
-                const dx = nodes[i].x - nodes[j].x;
-                const dy = nodes[i].y - nodes[j].y;
-                if (Math.sqrt(dx * dx + dy * dy) < 300) {
-                    ctx.moveTo(nodes[i].x, nodes[i].y);
-                    ctx.lineTo(nodes[j].x, nodes[j].y);
-                }
-            }
+function updateMap() {
+    // 1. Ambulances
+    const amIds = Object.keys(simState.ambulances);
+    // Remove stale ones
+    Object.keys(markerRefs.ambulances).forEach(id => {
+        if (!amIds.includes(id)) {
+            map.removeLayer(markerRefs.ambulances[id]);
+            delete markerRefs.ambulances[id];
         }
-        ctx.stroke();
-    }
-
-    // 3. Jams
-    simState.jams.forEach(jam => {
-        const { x, y } = coordToPixel(jam.lat, jam.lon);
-        // Area
-        ctx.fillStyle = 'rgba(254, 205, 211, 0.5)'; // Rose 200 light
-        ctx.strokeStyle = '#DC2626';
-        ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(x, y, 30, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-
-        ctx.fillStyle = '#FFF';
-        ctx.beginPath(); ctx.arc(x, y, 12, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#DC2626';
-        ctx.font = '14px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText('⚠️', x, y);
     });
-
-    // 4. POIs
-    simState.pois.forEach(poi => {
-        const { x, y } = coordToPixel(poi.lat, poi.lon);
-        const isHosp = poi.type === 'HOSPITAL';
-        const color = isHosp ? '#2563EB' : '#F59E0B';
-        const symbol = isHosp ? '🏥' : '⛽';
-
-        // Glow dashed outline
-        ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
-        ctx.beginPath(); ctx.arc(x, y, 20, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
-
-        ctx.fillStyle = '#F8FAFC'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(x, y, 16, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-
-        ctx.fillStyle = '#FFF';
-        ctx.beginPath(); ctx.arc(x, y, 10, 0, Math.PI * 2); ctx.fill();
-        ctx.font = '12px "Segoe UI Emoji", Arial'; ctx.fillText(symbol, x, y);
-    });
-
-    // 5. Emergencies
-    Object.values(simState.emergencies).forEach(em => {
-        const { x, y } = coordToPixel(em.lat, em.lon);
-        ctx.fillStyle = '#FFF'; ctx.strokeStyle = '#DC2626'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(x, y, 12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-
-        let symbol = '🚨';
-        if (em.status === 'PROCESSING') { symbol = '✚'; ctx.fillStyle = '#DC2626'; }
-        if (em.status === 'RESOLVED') { symbol = '🤕'; ctx.fillStyle = '#F59E0B'; }
-
-        ctx.font = '16px "Segoe UI Emoji"'; ctx.fillText(symbol, x, y);
-    });
-
-    // 6. Ambulances
-    Object.values(simState.ambulances).forEach(amb => {
+    // Add or update
+    amIds.forEach(id => {
+        const amb = simState.ambulances[id];
         const lat = amb.logistics.latitude;
         const lon = amb.logistics.longitude;
         if (!lat || !lon) return;
-        const { x, y } = coordToPixel(lat, lon);
 
         const ms = amb.logistics.mission_status;
-        const color = ms === "ACTIVE" ? '#10B981' : (ms === "IN_USE" ? '#2563EB' : '#F59E0B');
+        const colorClass = ms === "ACTIVE" ? 'marker-amb-active' : (ms === "IN_USE" ? 'marker-amb-active' : 'marker-amb-inactive');
 
-        ctx.fillStyle = color; ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(x, y, 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        const html = `<div class="${colorClass} w-full h-full rounded-full flex items-center justify-center text-[10px] font-bold text-white shadow-lg">🚑</div>`;
+        const icon = L.divIcon({ className: `custom-div-icon ${colorClass}`, html: html, iconSize: [28, 28], iconAnchor: [14, 14] });
 
-        // ID Tag
-        ctx.fillStyle = '#FFFFFF'; ctx.strokeStyle = '#E2E8F0'; ctx.lineWidth = 1;
-        ctx.fillRect(x - 24, y - 26, 48, 14); ctx.strokeRect(x - 24, y - 26, 48, 14);
+        if (!markerRefs.ambulances[id]) {
+            markerRefs.ambulances[id] = L.marker([lat, lon], { icon }).addTo(map);
+            markerRefs.ambulances[id].bindTooltip(id, { permanent: true, direction: 'right', offset: [15, 0], className: 'bg-white/90 border border-slate-300 shadow font-bold text-[10px] rounded px-1 !p-0 !m-0', opacity: 1 });
+        } else {
+            markerRefs.ambulances[id].setLatLng([lat, lon]);
+            markerRefs.ambulances[id].setIcon(icon);
+        }
 
-        ctx.fillStyle = '#0F172A';
-        ctx.font = 'bold 9px Arial'; ctx.fillText(amb.ambulance_id, x, y - 19);
+        // OSRM Real Routing Logic (Only if toggled)
+        const destType = amb.logistics.destination_type;
+        let showLines = false;
+        let routeColor = '#94a3b8'; // Slate base
+
+        if (destType === 'EMERGENCY') {
+            showLines = document.getElementById('chk-route-em') ? document.getElementById('chk-route-em').checked : true;
+            routeColor = '#ef4444'; // Red
+        } else if (destType === 'HOSPITAL') {
+            showLines = document.getElementById('chk-route-hosp') ? document.getElementById('chk-route-hosp').checked : true;
+            routeColor = '#10b981'; // Green
+        } else if (destType === 'GAS_STATION') {
+            showLines = document.getElementById('chk-route-gas') ? document.getElementById('chk-route-gas').checked : true;
+            routeColor = '#f59e0b'; // Amber
+        }
+
+        if (showLines && amb.logistics.has_destination && amb.logistics.destination_lat && amb.logistics.destination_lon) {
+            const destKey = `${amb.logistics.destination_lat.toFixed(5)},${amb.logistics.destination_lon.toFixed(5)}`;
+
+            // Check if we already have the correct active route drawn for this exact destination
+            if (markerRefs.ambulances[id]._currentDestKey !== destKey) {
+                markerRefs.ambulances[id]._currentDestKey = destKey;
+
+                // Remove old route
+                if (activeRoutes[id]) {
+                    map.removeLayer(activeRoutes[id]);
+                    delete activeRoutes[id];
+                }
+
+                // Fetch new route (or use cache)
+                const cacheKey = `${lon.toFixed(4)},${lat.toFixed(4)};${amb.logistics.destination_lon.toFixed(4)},${amb.logistics.destination_lat.toFixed(4)}`;
+                const styleObj = { color: routeColor, weight: 5, opacity: 0.9, className: 'route-glow' };
+
+                if (routeCache[cacheKey]) {
+                    activeRoutes[id] = L.geoJSON(routeCache[cacheKey], { style: styleObj }).addTo(map);
+                } else {
+                    const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${lon},${lat};${amb.logistics.destination_lon},${amb.logistics.destination_lat}?overview=full&geometries=geojson`;
+                    fetch(osrmUrl)
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.routes && data.routes.length > 0) {
+                                const geojson = data.routes[0].geometry;
+                                routeCache[cacheKey] = geojson;
+                                // Double check it hasn't changed destination while fetching
+                                if (markerRefs.ambulances[id]._currentDestKey === destKey) {
+                                    activeRoutes[id] = L.geoJSON(geojson, { style: styleObj }).addTo(map);
+                                }
+                            }
+                        }).catch(e => console.error("OSRM Route Error:", e));
+                }
+            }
+        } else {
+            // No destination or lines disabled, remove active route for this ambulance
+            if (activeRoutes[id]) {
+                map.removeLayer(activeRoutes[id]);
+                delete activeRoutes[id];
+            }
+            markerRefs.ambulances[id]._currentDestKey = null;
+        }
     });
 
-    requestAnimationFrame(drawLoop);
+    // 2. Emergencies
+    const emIds = Object.keys(simState.emergencies);
+    Object.keys(markerRefs.emergencies).forEach(id => {
+        if (!emIds.includes(id)) {
+            map.removeLayer(markerRefs.emergencies[id]);
+            delete markerRefs.emergencies[id];
+        }
+    });
+    emIds.forEach(id => {
+        const em = simState.emergencies[id];
+
+        let cClass = 'marker-em-initiated';
+        if (em.status === 'PROCESSING') cClass = 'marker-em-processing';
+        else if (em.status === 'TRANSPORTING') cClass = 'marker-em-transporting';
+        else if (em.status === 'RESOLVED') cClass = 'marker-em-inactive';
+
+        const icon = L.divIcon({ className: `custom-div-icon ${cClass} rounded-full flex items-center justify-center text-[14px] text-white shadow-lg w-full h-full`, html: '🚨', iconSize: [24, 24], iconAnchor: [12, 12] });
+
+        if (!markerRefs.emergencies[id]) {
+            markerRefs.emergencies[id] = L.marker([em.lat, em.lon], { icon }).addTo(map);
+        } else {
+            markerRefs.emergencies[id].setLatLng([em.lat, em.lon]);
+            markerRefs.emergencies[id].setIcon(icon);
+        }
+    });
+
+    // 3. POIs
+    // Re-drawing blindly is quick enough for few POIs, but doing optimal syncing:
+    const poiKeys = simState.pois.map(p => `${p.lat},${p.lon}`);
+    Object.keys(markerRefs.pois).forEach(k => {
+        if (!poiKeys.includes(k)) {
+            map.removeLayer(markerRefs.pois[k]);
+            delete markerRefs.pois[k];
+        }
+    });
+    simState.pois.forEach(poi => {
+        const key = `${poi.lat},${poi.lon}`;
+        if (!markerRefs.pois[key]) {
+            const isHosp = poi.type === 'HOSPITAL';
+            const cClass = isHosp ? 'marker-poi-hospital' : 'marker-poi-gas';
+            const symbol = isHosp ? '🏥' : '⛽';
+            const icon = L.divIcon({ className: `custom-div-icon ${cClass} flex items-center justify-center text-[14px] shadow-lg w-full h-full`, html: symbol, iconSize: [30, 30], iconAnchor: [15, 15] });
+            markerRefs.pois[key] = L.marker([poi.lat, poi.lon], { icon }).addTo(map);
+        }
+    });
+
+    // 4. Jams
+    const jamKeys = simState.jams.map(j => `${j.lat},${j.lon}`);
+    Object.keys(markerRefs.jams).forEach(k => {
+        if (!jamKeys.includes(k)) {
+            map.removeLayer(markerRefs.jams[k]);
+            delete markerRefs.jams[k];
+        }
+    });
+    simState.jams.forEach(jam => {
+        const key = `${jam.lat},${jam.lon}`;
+        if (!markerRefs.jams[key]) {
+            const icon = L.divIcon({ className: `custom-div-icon marker-jam flex items-center justify-center text-white shadow-lg w-full h-full`, html: '⚠️', iconSize: [40, 40], iconAnchor: [20, 20] });
+            markerRefs.jams[key] = L.marker([jam.lat, jam.lon], { icon }).addTo(map);
+        }
+    });
+
+    // 5. Predictive Highway Lines
+    predictiveLinesLayer.clearLayers();
+    const showLines = document.getElementById('chk-lines') ? document.getElementById('chk-lines').checked : true;
+    if (showLines) {
+        const nodes = [...simState.pois.map(p => [p.lat, p.lon]), ...simState.jams.map(j => [j.lat, j.lon])];
+        for (let i = 0; i < nodes.length; i++) {
+            for (let j = i + 1; j < nodes.length; j++) {
+                const dy = nodes[i][0] - nodes[j][0];
+                const dx = nodes[i][1] - nodes[j][1];
+                // rough mapping distance approximation equivalent to ~300px visual distance
+                if (Math.sqrt(dx * dx + dy * dy) < 0.015) {
+                    L.polyline([nodes[i], nodes[j]], { color: '#cbd5e1', weight: 3, dashArray: '5, 5', opacity: 0.7 }).addTo(predictiveLinesLayer);
+                }
+            }
+        }
+    }
 }
 
 // -------------------------------------------------------------
@@ -202,6 +252,7 @@ socket.on('sim_state', (state) => {
     sliderSpeed.value = state.speed_multiplier;
 
     updateFleetUI();
+    updateMap(); // Call the Leaflet re-sync
 });
 
 function updateFleetUI() {
@@ -311,22 +362,41 @@ document.querySelectorAll('input[name="drawMode"]').forEach(radio => {
     });
 });
 
-canvas.addEventListener('dblclick', (e) => {
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const { lat, lon } = pixelToCoord(x, y);
-    postJson('/api/spawn', { type: getDrawMode(), lat, lon });
+map.on('click', function (e) {
+    if (getDrawMode() === 'PAN') return;
+    postJson('/api/spawn', { type: getDrawMode(), lat: e.latlng.lat, lon: e.latlng.lng });
 });
 
-canvas.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const { lat, lon } = pixelToCoord(x, y);
-    postJson('/api/delete', { lat, lon });
+map.on('contextmenu', function (e) {
+    if (getDrawMode() === 'PAN') return;
+    postJson('/api/delete', { lat: e.latlng.lat, lon: e.latlng.lng });
 });
+
+// City Search Logic
+const btnSearchCity = document.getElementById('btn-search-city');
+const inputCitySearch = document.getElementById('city-search');
+
+if (btnSearchCity && inputCitySearch) {
+    btnSearchCity.addEventListener('click', () => {
+        const city = inputCitySearch.value.trim();
+        if (!city) return;
+
+        fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(city)}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data && data.length > 0) {
+                    const lat = parseFloat(data[0].lat);
+                    const lon = parseFloat(data[0].lon);
+                    map.flyTo([lat, lon], 13, { duration: 1.5 });
+                }
+            })
+            .catch(e => console.error("Nominatim Search Error:", e));
+    });
+
+    inputCitySearch.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') btnSearchCity.click();
+    });
+}
 
 // -------------------------------------------------------------
 // Telemetry Modal logic
@@ -357,5 +427,3 @@ document.getElementById('btn-close-modal').addEventListener('click', () => {
     clearInterval(modalRefreshInterval);
 });
 
-// Start loop
-requestAnimationFrame(drawLoop);

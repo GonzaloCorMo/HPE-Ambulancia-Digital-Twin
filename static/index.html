@@ -10,6 +10,12 @@
     <!-- Socket.IO -->
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
+    <!-- Leaflet JS & CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
     <link rel="stylesheet" href="/style.css">
 </head>
 
@@ -69,15 +75,26 @@
                         <span>Backup Backend (HTTP)</span>
                     </label>
                     <label class="flex items-center space-x-2">
-                        <input type="checkbox" id="chk-lines" checked class="w-4 h-4 text-emerald-600 rounded">
-                        <span>Líneas Predictivas</span>
+                        <input type="checkbox" id="chk-route-em" checked
+                            class="w-4 h-4 text-red-600 rounded accent-red-600">
+                        <span>Rutas Urgencia (Rojo)</span>
+                    </label>
+                    <label class="flex items-center space-x-2">
+                        <input type="checkbox" id="chk-route-hosp" checked
+                            class="w-4 h-4 text-emerald-600 rounded accent-emerald-600">
+                        <span>Rutas Hospital (Verde)</span>
+                    </label>
+                    <label class="flex items-center space-x-2 col-span-2">
+                        <input type="checkbox" id="chk-route-gas" checked
+                            class="w-4 h-4 text-amber-500 rounded accent-amber-500">
+                        <span>Rutas Gasolinera (Amarillo)</span>
                     </label>
                 </div>
             </div>
 
             <!-- Fleet Overview -->
             <div
-                class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex-1 flex flex-col h-full overflow-hidden">
+                class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex-1 flex flex-col h-full overflow-hidden min-h-0">
                 <h2 class="text-lg font-bold text-blue-600 mb-4 border-b border-slate-100 pb-2">🚑 Estado de la Flota
                 </h2>
                 <div id="fleet-container" class="overflow-y-auto pr-2 space-y-3 flex-1 custom-scrollbar">
@@ -93,11 +110,23 @@
             <!-- Map Container -->
             <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col relative flex-1">
                 <div class="flex justify-between items-center mb-4 border-b border-slate-100 pb-2">
-                    <h2 class="text-lg font-bold text-blue-600">🗺️ Radar Táctico de Posicionamiento</h2>
+                    <div class="flex items-center gap-3">
+                        <h2 class="text-lg font-bold text-blue-600">🗺️ Radar Táctico de Posicionamiento</h2>
+                        <div
+                            class="flex bg-slate-100 rounded border border-slate-200 overflow-hidden shadow-inner text-sm">
+                            <input type="text" id="city-search" placeholder="Buscar ciudad..."
+                                class="px-2 py-1 outline-none bg-transparent w-40 text-slate-700">
+                            <button id="btn-search-city"
+                                class="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-600 transition">🔍</button>
+                        </div>
+                    </div>
 
                     <!-- Mode Selector -->
                     <div
                         class="flex bg-slate-100 rounded-lg p-1 text-sm font-semibold shadow-inner border border-slate-200">
+                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
+                            <input type="radio" name="drawMode" value="PAN" class="hidden"> 🖐️ Desplazar
+                        </label>
                         <label class="cursor-pointer px-3 py-1 rounded radio-mode">
                             <input type="radio" name="drawMode" value="EMERGENCY" class="hidden" checked> 🚨 Urgencia
                         </label>
@@ -117,10 +146,11 @@
                 </div>
 
                 <div
-                    class="relative w-full h-full bg-slate-100 border-2 border-slate-300 rounded-lg overflow-hidden cursor-crosshair">
-                    <canvas id="tactical-map"></canvas>
-                    <div class="absolute top-2 right-2 text-xs font-bold text-slate-400 opacity-70">
-                        [Doble-Clic] Añadir | [Clic-Derecho] Eliminar
+                    class="relative w-full h-full bg-slate-100 border-2 border-slate-300 rounded-lg overflow-hidden cursor-crosshair z-0">
+                    <div id="tactical-map" class="absolute inset-0 z-0"></div>
+                    <div
+                        class="absolute top-2 right-2 text-xs font-bold text-slate-400 bg-white/80 px-2 rounded-md shadow z-[1000] pointer-events-none">
+                        [Clic] Añadir | [Clic-Derecho] Eliminar
                     </div>
                 </div>
             </div>

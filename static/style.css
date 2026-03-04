@@ -21,6 +21,7 @@
 #terminal-logs::-webkit-scrollbar-thumb {
     background: #334155;
 }
+
 #terminal-logs::-webkit-scrollbar-thumb:hover {
     background: #475569;
 }
@@ -31,8 +32,105 @@
 }
 
 /* We handle the selected visual state via JS in app.js for radio inputs */
+/* We handle the selected visual state via JS in app.js for radio inputs */
 .radio-mode.active {
     background-color: #ffffff;
     color: #2563EB;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* Leaflet 2.5D Marker Override Styles */
+.leaflet-marker-icon {
+    transition: transform 0.1s linear;
+    /* Smooth hardware interpolation between 10Hz socket ticks */
+    border-radius: 50%;
+}
+
+.marker-shadow {
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+.marker-amb-active {
+    background-color: #3b82f6;
+    /* Blue 500 */
+    border: 2px solid white;
+    box-shadow: 0 0 10px rgba(59, 130, 246, 0.6), 0 4px 6px rgba(0, 0, 0, 0.3);
+    z-index: 1000 !important;
+}
+
+.marker-amb-inactive {
+    background-color: #94a3b8;
+    /* Slate 400 */
+    border: 2px solid white;
+    filter: grayscale(1);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+    z-index: 500 !important;
+}
+
+.marker-poi-hospital {
+    background-color: #10b981;
+    /* Emerald 500 */
+    border: 2px solid white;
+    border-radius: 8px;
+    /* Square for buildings */
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+.marker-poi-gas {
+    background-color: #f59e0b;
+    /* Amber 500 */
+    border: 2px solid white;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+.marker-jam {
+    background-color: #ef4444;
+    /* Red 500 */
+    border: none;
+    opacity: 0.6;
+    animation: pulse 2s infinite;
+}
+
+.marker-em-initiated {
+    background-color: #ef4444;
+    /* Red 500 */
+    border: 2px solid white;
+    box-shadow: 0 0 15px rgba(239, 68, 68, 0.8);
+    animation: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;
+    z-index: 900 !important;
+}
+
+.marker-em-processing {
+    background-color: #f59e0b;
+    /* Amber 500 */
+    border: 2px solid white;
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.8);
+    z-index: 900 !important;
+}
+
+.marker-em-transporting {
+    background-color: #3b82f6;
+    /* Blue 500 */
+    border: 2px solid white;
+    box-shadow: 0 0 10px rgba(59, 130, 246, 0.8);
+    z-index: 900 !important;
+}
+
+@keyframes pulse-glow {
+    0% {
+        filter: drop-shadow(0 0 2px currentColor);
+    }
+
+    50% {
+        filter: drop-shadow(0 0 8px currentColor);
+    }
+
+    100% {
+        filter: drop-shadow(0 0 2px currentColor);
+    }
+}
+
+.route-glow {
+    animation: pulse-glow 2s infinite;
 }
