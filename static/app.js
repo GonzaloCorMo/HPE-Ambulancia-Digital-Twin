@@ -26,9 +26,8 @@ const markerRefs = {
     jams: {}
 };
 
-let predictiveLinesLayer = L.layerGroup().addTo(map);
-const activeRoutes = {}; // Stores L.geoJSON layers for each ambulance ID
-const routeCache = {};   // Stores raw GeoJSON objects to prevent duplicate fetches
+const activeRoutes = {}; // Stores L.polyline layers for each ambulance ID
+const routeCache = {};   // Stores raw GeoJSON coordinate arrays to prevent duplicate fetches
 
 // -------------------------------------------------------------
 // Drawing Logic (State sync based)
@@ -82,39 +81,59 @@ function updateMap() {
 
         if (showLines && amb.logistics.has_destination && amb.logistics.destination_lat && amb.logistics.destination_lon) {
             const destKey = `${amb.logistics.destination_lat.toFixed(5)},${amb.logistics.destination_lon.toFixed(5)}`;
+            const styleObj = { color: routeColor, weight: 5, opacity: 0.9, className: 'route-glow' };
 
-            // Check if we already have the correct active route drawn for this exact destination
+            // Fetch geometry ONCE per exact destination
             if (markerRefs.ambulances[id]._currentDestKey !== destKey) {
                 markerRefs.ambulances[id]._currentDestKey = destKey;
+                markerRefs.ambulances[id]._routeCoords = null; // clear existing array
 
-                // Remove old route
                 if (activeRoutes[id]) {
                     map.removeLayer(activeRoutes[id]);
                     delete activeRoutes[id];
                 }
 
-                // Fetch new route (or use cache)
                 const cacheKey = `${lon.toFixed(4)},${lat.toFixed(4)};${amb.logistics.destination_lon.toFixed(4)},${amb.logistics.destination_lat.toFixed(4)}`;
-                const styleObj = { color: routeColor, weight: 5, opacity: 0.9, className: 'route-glow' };
 
                 if (routeCache[cacheKey]) {
-                    activeRoutes[id] = L.geoJSON(routeCache[cacheKey], { style: styleObj }).addTo(map);
+                    markerRefs.ambulances[id]._routeCoords = routeCache[cacheKey];
                 } else {
                     const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${lon},${lat};${amb.logistics.destination_lon},${amb.logistics.destination_lat}?overview=full&geometries=geojson`;
                     fetch(osrmUrl)
                         .then(r => r.json())
                         .then(data => {
                             if (data.routes && data.routes.length > 0) {
-                                const geojson = data.routes[0].geometry;
-                                routeCache[cacheKey] = geojson;
-                                // Double check it hasn't changed destination while fetching
+                                const coords = data.routes[0].geometry.coordinates; // Array of [lon, lat]
+                                routeCache[cacheKey] = coords;
                                 if (markerRefs.ambulances[id]._currentDestKey === destKey) {
-                                    activeRoutes[id] = L.geoJSON(geojson, { style: styleObj }).addTo(map);
+                                    markerRefs.ambulances[id]._routeCoords = coords;
                                 }
                             }
                         }).catch(e => console.error("OSRM Route Error:", e));
                 }
             }
+
+            // Continuous Frame Update: Slice coordinates by `route_step` to simulate vanishing path
+            if (markerRefs.ambulances[id]._routeCoords) {
+                const step = amb.logistics.route_step || 0;
+                let sliced = markerRefs.ambulances[id]._routeCoords.slice(step);
+
+                if (sliced.length > 0) {
+                    let latlngs = sliced.map(c => [c[1], c[0]]); // Leaflet uses [lat, lon]
+                    latlngs.unshift([lat, lon]); // Hook visually to the current ambulance position
+
+                    if (activeRoutes[id]) {
+                        activeRoutes[id].setLatLngs(latlngs);
+                        activeRoutes[id].setStyle(styleObj);
+                    } else {
+                        activeRoutes[id] = L.polyline(latlngs, styleObj).addTo(map);
+                    }
+                } else if (activeRoutes[id]) {
+                    map.removeLayer(activeRoutes[id]);
+                    delete activeRoutes[id];
+                }
+            }
+
         } else {
             // No destination or lines disabled, remove active route for this ambulance
             if (activeRoutes[id]) {
@@ -122,6 +141,7 @@ function updateMap() {
                 delete activeRoutes[id];
             }
             markerRefs.ambulances[id]._currentDestKey = null;
+            markerRefs.ambulances[id]._routeCoords = null;
         }
     });
 
@@ -187,22 +207,6 @@ function updateMap() {
         }
     });
 
-    // 5. Predictive Highway Lines
-    predictiveLinesLayer.clearLayers();
-    const showLines = document.getElementById('chk-lines') ? document.getElementById('chk-lines').checked : true;
-    if (showLines) {
-        const nodes = [...simState.pois.map(p => [p.lat, p.lon]), ...simState.jams.map(j => [j.lat, j.lon])];
-        for (let i = 0; i < nodes.length; i++) {
-            for (let j = i + 1; j < nodes.length; j++) {
-                const dy = nodes[i][0] - nodes[j][0];
-                const dx = nodes[i][1] - nodes[j][1];
-                // rough mapping distance approximation equivalent to ~300px visual distance
-                if (Math.sqrt(dx * dx + dy * dy) < 0.015) {
-                    L.polyline([nodes[i], nodes[j]], { color: '#cbd5e1', weight: 3, dashArray: '5, 5', opacity: 0.7 }).addTo(predictiveLinesLayer);
-                }
-            }
-        }
-    }
 }
 
 // -------------------------------------------------------------
@@ -307,15 +311,15 @@ function updateFleetUI() {
 
         // Update strings
         const vStr = `♥ ${v.heart_rate} bpm | O2: ${v.oxygen_level}% | ${v.patient_status}`;
-        const mStr = `⛽ ${m.fuel_level}% | Temp: ${m.engine_temperature}C | ${m.status}`;
-        const lStr = `📍 ${l.speed} km/h | Mis: ${l.mission_status}`;
-        // Pseudo logic for networks based on simulator state since we removed standard socket p2p strings from engine
-        const pStr = `📡 MQTT/P2P OK`;
+        const mStr = `⛽ ${m.fuel_level}% | Temp: ${m.engine_temperature}C`;
+        const actionStr = l.action_message || "Esperando órdenes";
 
         card.querySelector('.tag-vit').textContent = vStr;
         card.querySelector('.tag-mech').textContent = mStr;
-        card.querySelector('.tag-log').textContent = lStr;
-        card.querySelector('.tag-net').textContent = pStr;
+
+        // Re-purpose the bottom slots for the new Action Message and Logistics
+        card.querySelector('.tag-log').innerHTML = `<span class="font-bold text-slate-700">Vel:</span> ${Math.round(l.speed)} km/h`;
+        card.querySelector('.tag-net').innerHTML = `<span class="px-2 py-[2px] rounded-full bg-slate-200 text-slate-700 font-bold text-[10px]">${actionStr}</span>`;
     });
 }
 

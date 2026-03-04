@@ -123,6 +123,7 @@ class SimulatorEngine:
                                     self.log_network(f"[DISPATCHER] 🏥 Unidad {amb.id} transportando al Hospital [Dist: {dist_info:.2f} km].")
                                     
                                     amb.logistics.set_destination(best_h["lat"], best_h["lon"], "HOSPITAL")
+                                    amb.logistics.action_message = "Transportando al Hospital" # Added action_message
                                     em["status"] = "TRANSPORTING"
                                 
                 elif em["status"] == "TRANSPORTING":
@@ -135,6 +136,7 @@ class SimulatorEngine:
                                 # We assume this transport corresponds to the emergency in transporting state
                                 amb.logistics.mission_status = "ACTIVE"
                                 amb.vitals.has_patient = False
+                                amb.logistics.action_message = "Esperando asignación" # Added action_message
                                 
                                 em["status"] = "RESOLVED"
                                 if em["id"] in self.active_emergencies:

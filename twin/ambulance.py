@@ -61,9 +61,10 @@ class AmbulanceTwin:
             # ORCHESTRATION: Smart fuel management (Go to gas if < 60%)
             if self.mechanical.fuel_level < 60.0 and not self.mechanical.is_refueling:
                 # If we are strictly free, drop what we are doing and route to refuel
-                if self.mechanical.fuel_level < 60.0 and self.logistics.mission_status == "ACTIVE":
+                if self.logistics.mission_status == "ACTIVE":
                     self.logistics.mission_status = "INACTIVE"
                     self.logistics.route_to_nearest("GAS_STATION")
+                    self.logistics.action_message = "Enrutando a Gasolinera"
                     if self.log_callback: self.log_callback(f"[{self.id}] ⛽ Combustible bajo crítico (60%). Interrumpiendo patrulla, enrutando a repostaje.")
                 
             if self.logistics.destination is None and self.logistics.destination_type == "GAS_STATION" and self.logistics.mission_status == "INACTIVE":
@@ -76,17 +77,20 @@ class AmbulanceTwin:
                 self.mechanical.is_refueling = False
                 self.logistics.mission_status = "ACTIVE"
                 self.logistics.destination_type = None # IMPORTANT BUG FIX: Prevent infinite loop matching rule below again.
+                self.logistics.action_message = "Estacionada (Motor frío)"
                 if self.log_callback: self.log_callback(f"[{self.id}] ✅ Tanque lleno (100%). Volviendo a estado OPERATIVO.")
                 
             if self.mechanical.is_refueling:
                 self.logistics.speed = 0.0
                 self.logistics.acceleration = 0.0
+                self.logistics.action_message = "Repostando (Bomba conectada)"
                 
             # Orchestration: Out of fuel
             if self.mechanical.fuel_level <= 0.0:
                  self.logistics.speed = 0.0
                  self.logistics.acceleration = 0.0
                  self.logistics.mission_status = "INACTIVE"
+                 self.logistics.action_message = "Averiada (Sin combustible)"
 
             engine_on = self.logistics.speed > 0.1 or self.logistics.mission_status == "IN_USE"
             mech_state = self.mechanical.step(dt=1.0, distance_km=dist_km, speed_multiplier=self.speed_multiplier, engine_on=engine_on)

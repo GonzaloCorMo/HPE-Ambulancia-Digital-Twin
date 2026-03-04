@@ -13,6 +13,8 @@ def add_poi(poi_type, lat, lon):
 def add_jam(lat, lon, radius=0.005):
     JAMS.append({"lat": lat, "lon": lon, "radius": radius})
 
+ROUTE_CACHE = {}
+
 class LogisticsEngine:
     def __init__(self, start_lat=40.4168, start_lon=-3.7038):
         self.lat = start_lat
@@ -27,12 +29,21 @@ class LogisticsEngine:
         self.mission_status = "ACTIVE" # ACTIVE, IN_USE, INACTIVE
         self.route_geometry = []
         self.route_step = 0
+        self.action_message = "Esperando asignación..."
         
     def set_destination(self, lat, lon, dest_type="HOSPITAL"):
         self.destination = (lat, lon)
         self.destination_type = dest_type
         self.route_geometry = []
         self.route_step = 0
+        
+        # Build strict cache key
+        cache_key = f"{round(self.lon, 4)},{round(self.lat, 4)}_{round(lon, 4)},{round(lat, 4)}"
+        
+        if cache_key in ROUTE_CACHE:
+            self.route_geometry = ROUTE_CACHE[cache_key].copy()
+            return
+
         try:
             import urllib.request, json
             url = f"https://router.project-osrm.org/route/v1/driving/{self.lon},{self.lat};{lon},{lat}?overview=full&geometries=geojson"
@@ -42,6 +53,7 @@ class LogisticsEngine:
                 if data.get("routes") and len(data["routes"]) > 0:
                     coords = data["routes"][0]["geometry"]["coordinates"]
                     self.route_geometry = [(c[1], c[0]) for c in coords] # Store as (lat, lon)
+                    ROUTE_CACHE[cache_key] = self.route_geometry.copy()
         except Exception as e:
             print(f"OSRM Route fetch error: {e}")
             self.route_geometry = [(self.lat, self.lon), (lat, lon)]
@@ -91,33 +103,55 @@ class LogisticsEngine:
                 if random.random() < 0.2 * adjusted_dt: # 20% chance per second to realize and detour
                     self.route_to_alternative("HOSPITAL")
 
-        if self.destination and getattr(self, "route_geometry", None) and getattr(self, "route_step", 0) < len(self.route_geometry):
-            target_lat, target_lon = self.route_geometry[self.route_step]
-            d_lon = target_lon - self.lon
-            d_lat = target_lat - self.lat
-            self.heading = math.degrees(math.atan2(d_lon, d_lat))
-            
+        if self.destination and getattr(self, "route_geometry", None):
             if self.speed < target_speed:
                 self.acceleration = 2.0
                 self.speed = min(target_speed, self.speed + (self.acceleration * adjusted_dt * 3.6))
             elif self.speed > target_speed:
                 self.speed = max(target_speed, self.speed - (5.0 * adjusted_dt * 3.6))
                 
-            distance_to_dest = math.sqrt(d_lat**2 + d_lon**2)
-            if distance_to_dest < 0.005: # reached local node
-                self.route_step += 1
-                if self.route_step >= len(self.route_geometry):
-                    self.speed = 0.0
-                    self.destination = None
-                    self.lat, self.lon = target_lat, target_lon # Snap exactly to target instantly
-                    self.route_geometry = []
+            distance_to_move_km = (self.speed / 3600.0) * adjusted_dt
+            self.last_distance_km = distance_to_move_km
+            
+            while distance_to_move_km > 0 and getattr(self, "route_step", 0) < len(self.route_geometry):
+                target_lat, target_lon = self.route_geometry[self.route_step]
+                d_lat = target_lat - self.lat
+                d_lon = target_lon - self.lon
+                d_deg = math.sqrt(d_lat**2 + (d_lon * math.cos(math.radians(self.lat)))**2)
+                d_km = d_deg * 111.0
+                
+                if d_km <= distance_to_move_km:
+                    distance_to_move_km -= d_km
+                    self.lat, self.lon = target_lat, target_lon
+                    self.route_step += 1
+                else:
+                    fraction = distance_to_move_km / d_km
+                    self.lat += d_lat * fraction
+                    self.lon += d_lon * fraction
+                    if d_deg > 0:
+                        self.heading = math.degrees(math.atan2(d_lon, d_lat))
+                    distance_to_move_km = 0
+                    
+            if getattr(self, "route_step", 0) >= len(self.route_geometry):
+                self.speed = 0.0
+                self.destination = None
+                self.route_geometry = []
+                self.route_step = 0
+                
+        elif self.destination:
+            # DESTINATION ASSIGNED BUT NO GEOMETRY LOADED YET. FORCING IDLE. 
+            self.acceleration = 0.0
+            self.speed = max(0, self.speed - 5.0 * adjusted_dt)
+            self.action_message = "Calculando ruta OSRM..."
+            
         else:
             self.acceleration = 0.0
             self.speed = max(0, self.speed - 5.0 * adjusted_dt)
-            
-        self.last_distance_km = (self.speed / 3600.0) * adjusted_dt
-        self.lat += (self.last_distance_km * math.cos(math.radians(self.heading))) / 111.0
-        self.lon += (self.last_distance_km * math.sin(math.radians(self.heading))) / (111.0 * math.cos(math.radians(self.lat)))
+            self.last_distance_km = (self.speed / 3600.0) * adjusted_dt
+            self.lat += (self.last_distance_km * math.cos(math.radians(self.heading))) / 111.0
+            self.lon += (self.last_distance_km * math.sin(math.radians(self.heading))) / (111.0 * math.cos(math.radians(self.lat)))
+            if self.speed <= 0:
+                self.action_message = "Estacionada (Motor frío)"
 
         return self.get_state()
 
@@ -138,9 +172,11 @@ class LogisticsEngine:
             "destination_lat": round(self.destination[0], 6) if self.destination else None,
             "destination_lon": round(self.destination[1], 6) if self.destination else None,
             "destination_type": self.destination_type,
+            "route_step": getattr(self, "route_step", 0),
             "traffic_status": traffic_status,
             "road_type": self.road_type,
-            "mission_status": self.mission_status
+            "mission_status": self.mission_status,
+            "action_message": self.action_message
         }
 
     def inject_interference(self, interference_type):

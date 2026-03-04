@@ -25,8 +25,8 @@ class MechanicalEngine:
             # State switch handled exclusively by ambulance orchestrator now
         else:
             if engine_on or distance_km > 0:
-                # Brutal realism: highly dependent on distance travelled
-                consumption = (5.0 * distance_km) + (0.05 * adjusted_dt)
+                # Realistic diesel consumption equivalent
+                consumption = (0.15 * distance_km) + (0.005 * adjusted_dt)
                 self.fuel_level = max(0.0, self.fuel_level - consumption)
                 if self.fuel_level < 1.0 and not self.broken:
                     self.broken = True # completely out of fuel
