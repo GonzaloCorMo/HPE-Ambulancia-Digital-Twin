@@ -10,8 +10,12 @@ class VitalsEngine:
         self.respiratory_rate = 16 # breaths/min
         self.body_temperature = 37.0 # Celsius
         self.patient_status = "stable" # stable, critical, deceased
+        self.has_patient = False # Simulator won't generate vitals if empty
 
     def step(self, dt=1.0):
+        if not self.has_patient:
+            return self.get_state()
+            
         if self.patient_status == "deceased":
             self.heart_rate = 0
             self.blood_pressure_sys = 0
@@ -39,6 +43,18 @@ class VitalsEngine:
         return self.get_state()
 
     def get_state(self):
+        if not self.has_patient:
+            return {
+                "heart_rate": 0,
+                "blood_pressure": "0/0",
+                "oxygen_level": 0.0,
+                "blood_sugar": 0,
+                "respiratory_rate": 0,
+                "body_temperature": 0.0,
+                "ecg_rhythm": "OFF",
+                "patient_status": "NONE"
+            }
+
         ecg_rhythm = "Normal Sinus Rhythm"
         if self.patient_status == "deceased":
             ecg_rhythm = "Asystole"

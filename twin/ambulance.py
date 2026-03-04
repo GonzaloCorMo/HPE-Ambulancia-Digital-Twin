@@ -19,12 +19,15 @@ class AmbulanceTwin:
         self.p2p_mesh = None
         
         self.running = False
+        self.is_paused = False
         self._thread = None
         
         # Store latest state
         self.current_state = {}
         self.p2p_enabled = True
         self.http_enabled = True
+        
+        self.speed_multiplier = 1.0
 
     def start(self):
         self.running = True
@@ -42,37 +45,52 @@ class AmbulanceTwin:
         last_https_sync = time.time()
         
         while self.running:
+            if self.is_paused:
+                time.sleep(0.5)
+                continue
+                
+            # Sleep scales inversely with multiplier
+            # dt is always logically 1 second for the physics, but occurs faster in real time
+            base_sleep = 1.0
+            actual_sleep = base_sleep / self.speed_multiplier
+            
             # 1. Step Logistics and get metrics
-            log_state = self.logistics.step(dt=1.0)
+            log_state = self.logistics.step(dt=1.0, speed_multiplier=self.speed_multiplier)
             dist_km = self.logistics.last_distance_km
             
-            # ORCHESTRATION: Smart fuel management
-            if self.mechanical.fuel_level < 15.0 and not self.mechanical.is_refueling:
-                if self.logistics.destination_type != "GAS_STATION":
+            # ORCHESTRATION: Smart fuel management (Go to gas if < 60%)
+            if self.mechanical.fuel_level < 60.0 and not self.mechanical.is_refueling:
+                # If we are strictly free, drop what we are doing and route to refuel
+                if self.mechanical.fuel_level < 60.0 and self.logistics.mission_status == "ACTIVE":
+                    self.logistics.mission_status = "INACTIVE"
                     self.logistics.route_to_nearest("GAS_STATION")
-                    if self.log_callback:
-                        self.log_callback(f"[{self.id}] ⚠️ Combustible bajo ({int(self.mechanical.fuel_level)}%). Desviando a ⛽...")
-                        
-            if self.logistics.destination is None and self.logistics.destination_type == "GAS_STATION":
+                    if self.log_callback: self.log_callback(f"[{self.id}] ⛽ Combustible bajo crítico (60%). Interrumpiendo patrulla, enrutando a repostaje.")
+                
+            if self.logistics.destination is None and self.logistics.destination_type == "GAS_STATION" and self.logistics.mission_status == "INACTIVE":
                 # Arrived at Gas Station
                 self.mechanical.is_refueling = True
                 self.logistics.destination_type = None
                 
+            # Finish Refueling State
+            if self.mechanical.is_refueling and self.mechanical.fuel_level >= 99.0:
+                self.mechanical.is_refueling = False
+                self.logistics.mission_status = "ACTIVE"
+                self.logistics.destination_type = None # IMPORTANT BUG FIX: Prevent infinite loop matching rule below again.
+                if self.log_callback: self.log_callback(f"[{self.id}] ✅ Tanque lleno (100%). Volviendo a estado OPERATIVO.")
+                
             if self.mechanical.is_refueling:
                 self.logistics.speed = 0.0
                 self.logistics.acceleration = 0.0
-                if self.mechanical.fuel_level >= 99.0:
-                    # Finished Refueling
-                    self.log_callback(f"[{self.id}] ⛽ Depósito Lleno. Retomando operaciones.")
-                    self.logistics.route_to_nearest("HOSPITAL")
-
+                
             # Orchestration: Out of fuel
             if self.mechanical.fuel_level <= 0.0:
                  self.logistics.speed = 0.0
                  self.logistics.acceleration = 0.0
+                 self.logistics.mission_status = "INACTIVE"
 
-            mech_state = self.mechanical.step(dt=1.0, distance_km=dist_km)
-            vit_state = self.vitals.step(dt=1.0)
+            engine_on = self.logistics.speed > 0.1 or self.logistics.mission_status == "IN_USE"
+            mech_state = self.mechanical.step(dt=1.0, distance_km=dist_km, speed_multiplier=self.speed_multiplier, engine_on=engine_on)
+            vit_state = self.vitals.step(dt=1.0) # Vitals operate at standard logical time
             
             # 2. Aggregate State
             self.current_state = {
@@ -100,16 +118,16 @@ class AmbulanceTwin:
                     self.log_callback(f"[{self.id}] \u2192 P2P BROADCAST | {compact_log}")
                 self.p2p_mesh.broadcast_state(self.current_state)
 
-            # 4. HTTPS Backup (Every 10 seconds)
+            # 4. HTTPS Backup (Every 10 seconds locally)
             current_time = time.time()
-            if current_time - last_https_sync >= 10.0 and self.http_enabled:
+            if current_time - last_https_sync >= (10.0 / self.speed_multiplier) and self.http_enabled:
                 if self.https_client:
                     if self.log_callback:
-                        self.log_callback(f"[{self.id}] \u2192 HTTP | Starting Backup Data Sync...")
+                        self.log_callback(f"[{self.id}] \u2192 HTTP | Backup...")
                     self.https_client.sync_backup(self.current_state)
                 last_https_sync = current_time
 
-            time.sleep(1.0)
+            time.sleep(actual_sleep)
 
     def inject_incident(self, category, incident_type):
         """

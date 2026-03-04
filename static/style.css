@@ -1,0 +1,38 @@
+/* Custom Scrollbar for better UI */
+.custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+
+/* For terminal */
+#terminal-logs::-webkit-scrollbar-thumb {
+    background: #334155;
+}
+#terminal-logs::-webkit-scrollbar-thumb:hover {
+    background: #475569;
+}
+
+/* Radio Button Mode Selection styling */
+.radio-mode {
+    transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* We handle the selected visual state via JS in app.js for radio inputs */
+.radio-mode.active {
+    background-color: #ffffff;
+    color: #2563EB;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}

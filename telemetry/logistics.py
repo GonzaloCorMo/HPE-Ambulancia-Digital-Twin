@@ -1,11 +1,17 @@
 import random
 import math
 
-POIS = [
-    {"type": "HOSPITAL", "lat": 40.4800, "lon": -3.6500},
-    {"type": "HOSPITAL", "lat": 40.4100, "lon": -3.7000},
-    {"type": "GAS_STATION", "lat": 40.4400, "lon": -3.6800}
-]
+# Shared Global State for dynamic map elements
+POIS = []
+
+# Jams are geofenced circles: {"lat": ..., "lon": ..., "radius": 0.005}
+JAMS = []
+
+def add_poi(poi_type, lat, lon):
+    POIS.append({"type": poi_type, "lat": lat, "lon": lon})
+
+def add_jam(lat, lon, radius=0.005):
+    JAMS.append({"lat": lat, "lon": lon, "radius": radius})
 
 class LogisticsEngine:
     def __init__(self, start_lat=40.4168, start_lon=-3.7038):
@@ -18,7 +24,7 @@ class LogisticsEngine:
         self.destination_type = None
         self.road_type = "urban"
         self.last_distance_km = 0.0
-        self.is_jammed = False
+        self.mission_status = "ACTIVE" # ACTIVE, IN_USE, INACTIVE
         
     def set_destination(self, lat, lon, dest_type="HOSPITAL"):
         self.destination = (lat, lon)
@@ -48,17 +54,26 @@ class LogisticsEngine:
         if best:
             self.set_destination(best["lat"], best["lon"], dest_type)
 
-    def step(self, dt=1.0):
+    def step(self, dt=1.0, speed_multiplier=1.0):
+        adjusted_dt = dt * speed_multiplier
+        
+        # Geofence Jam Detection
+        in_jam = False
+        for jam in JAMS:
+            d = math.sqrt((jam["lat"] - self.lat)**2 + (jam["lon"] - self.lon)**2)
+            if d <= jam["radius"]:
+                in_jam = True
+                break
+
         # Target speed
         target_speed = 80.0
-        if self.is_jammed:
+        if in_jam:
             target_speed = 10.0
             
             # Smart Routing: If jammed and heading to hospital, find alternative
             if self.speed < 15.0 and self.destination_type == "HOSPITAL":
-                if random.random() < 0.2: # 20% chance per second to realize and detour
+                if random.random() < 0.2 * adjusted_dt: # 20% chance per second to realize and detour
                     self.route_to_alternative("HOSPITAL")
-                    self.is_jammed = False # Assume detour clears the jam
 
         if self.destination:
             dest_lat, dest_lon = self.destination
@@ -68,19 +83,20 @@ class LogisticsEngine:
             
             if self.speed < target_speed:
                 self.acceleration = 2.0
-                self.speed = min(target_speed, self.speed + (self.acceleration * dt * 3.6))
+                self.speed = min(target_speed, self.speed + (self.acceleration * adjusted_dt * 3.6))
             elif self.speed > target_speed:
-                self.speed = max(target_speed, self.speed - (5.0 * dt * 3.6))
+                self.speed = max(target_speed, self.speed - (5.0 * adjusted_dt * 3.6))
                 
             distance_to_dest = math.sqrt(d_lat**2 + d_lon**2)
-            if distance_to_dest < 0.003: # Reached destination (approx 300m radius)
+            if distance_to_dest < 0.006: # Increased to accommodate high speed multipliers
                 self.speed = 0.0
                 self.destination = None
+                self.lat, self.lon = dest_lat, dest_lon # Snap exactly to target instantly
         else:
             self.acceleration = 0.0
-            self.speed = max(0, self.speed - 5.0 * dt)
+            self.speed = max(0, self.speed - 5.0 * adjusted_dt)
             
-        self.last_distance_km = (self.speed / 3600.0) * dt
+        self.last_distance_km = (self.speed / 3600.0) * adjusted_dt
         self.lat += (self.last_distance_km * math.cos(math.radians(self.heading))) / 111.0
         self.lon += (self.last_distance_km * math.sin(math.radians(self.heading))) / (111.0 * math.cos(math.radians(self.lat)))
 
@@ -102,10 +118,11 @@ class LogisticsEngine:
             "has_destination": self.destination is not None,
             "destination_type": self.destination_type,
             "traffic_status": traffic_status,
-            "road_type": self.road_type
+            "road_type": self.road_type,
+            "mission_status": self.mission_status
         }
 
     def inject_interference(self, interference_type):
         if interference_type == "traffic_jam":
-            self.is_jammed = True
-            self.speed = min(self.speed, 10.0)
+            # Just create a dynamic jam right on top of the ambulance
+            add_jam(self.lat, self.lon, 0.005)

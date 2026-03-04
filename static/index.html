@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ambulance Digital Twin</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Socket.IO -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+
+    <link rel="stylesheet" href="/style.css">
+</head>
+
+<body class="bg-slate-50 text-slate-800 font-sans h-screen flex flex-col overflow-hidden">
+
+    <!-- Navbar -->
+    <header class="bg-white border-b border-slate-200 px-6 py-4 flex items-center shadow-sm z-10">
+        <h1 class="text-2xl font-bold text-blue-600 uppercase tracking-wide">
+            Centro de Operaciones - Despacho y Control
+        </h1>
+        <div class="ml-auto flex space-x-4">
+            <div id="connection-status" class="flex items-center text-sm font-semibold text-red-500">
+                <span class="w-3 h-3 rounded-full bg-red-500 mr-2 animate-pulse"></span> Offline
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <div class="flex flex-1 overflow-hidden p-6 gap-6">
+
+        <!-- Left Panel: Controls & Fleet -->
+        <div class="w-1/3 flex flex-col gap-6 overflow-hidden">
+
+            <!-- System Controls -->
+            <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                <h2 class="text-lg font-bold text-blue-600 mb-4 border-b border-slate-100 pb-2">⚙️ Control del Simulador
+                </h2>
+
+                <div class="flex gap-2 mb-4">
+                    <button id="btn-play"
+                        class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-2 px-4 rounded transition border border-slate-200 shadow-sm">
+                        ▶️ INICIAR
+                    </button>
+                    <button id="btn-clear"
+                        class="flex-1 bg-red-100 hover:bg-red-200 text-red-700 font-bold py-2 px-4 rounded transition border border-red-200 shadow-sm">
+                        🗑️ BORRAR MAPA
+                    </button>
+                </div>
+
+                <div class="mb-4">
+                    <label class="block text-sm font-bold text-slate-600 mb-1">Multiplicador de Tiempo: <span
+                            id="speed-label" class="text-blue-600">1x</span></label>
+                    <input type="range" id="slider-speed" min="1" max="10" value="1" class="w-full accent-blue-600">
+                </div>
+
+                <div class="grid grid-cols-2 gap-2 text-sm font-semibold">
+                    <label class="flex items-center space-x-2">
+                        <input type="checkbox" id="chk-mqtt" checked class="w-4 h-4 text-blue-600 rounded">
+                        <span>Centralita (MQTT)</span>
+                    </label>
+                    <label class="flex items-center space-x-2">
+                        <input type="checkbox" id="chk-p2p" checked class="w-4 h-4 text-blue-600 rounded">
+                        <span>Malla Local (P2P)</span>
+                    </label>
+                    <label class="flex items-center space-x-2">
+                        <input type="checkbox" id="chk-http" checked class="w-4 h-4 text-blue-600 rounded">
+                        <span>Backup Backend (HTTP)</span>
+                    </label>
+                    <label class="flex items-center space-x-2">
+                        <input type="checkbox" id="chk-lines" checked class="w-4 h-4 text-emerald-600 rounded">
+                        <span>Líneas Predictivas</span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Fleet Overview -->
+            <div
+                class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex-1 flex flex-col h-full overflow-hidden">
+                <h2 class="text-lg font-bold text-blue-600 mb-4 border-b border-slate-100 pb-2">🚑 Estado de la Flota
+                </h2>
+                <div id="fleet-container" class="overflow-y-auto pr-2 space-y-3 flex-1 custom-scrollbar">
+                    <!-- Dynamic ambulance cards go here -->
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Right Panel: Map & Logs -->
+        <div class="w-2/3 flex flex-col gap-6">
+
+            <!-- Map Container -->
+            <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col relative flex-1">
+                <div class="flex justify-between items-center mb-4 border-b border-slate-100 pb-2">
+                    <h2 class="text-lg font-bold text-blue-600">🗺️ Radar Táctico de Posicionamiento</h2>
+
+                    <!-- Mode Selector -->
+                    <div
+                        class="flex bg-slate-100 rounded-lg p-1 text-sm font-semibold shadow-inner border border-slate-200">
+                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
+                            <input type="radio" name="drawMode" value="EMERGENCY" class="hidden" checked> 🚨 Urgencia
+                        </label>
+                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
+                            <input type="radio" name="drawMode" value="AMBULANCE" class="hidden"> 🚑 Ambulancia
+                        </label>
+                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
+                            <input type="radio" name="drawMode" value="JAM" class="hidden"> 🔴 Atasco
+                        </label>
+                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
+                            <input type="radio" name="drawMode" value="HOSPITAL" class="hidden"> 🏥 Hospital
+                        </label>
+                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
+                            <input type="radio" name="drawMode" value="GAS_STATION" class="hidden"> ⛽ Gasolinera
+                        </label>
+                    </div>
+                </div>
+
+                <div
+                    class="relative w-full h-full bg-slate-100 border-2 border-slate-300 rounded-lg overflow-hidden cursor-crosshair">
+                    <canvas id="tactical-map"></canvas>
+                    <div class="absolute top-2 right-2 text-xs font-bold text-slate-400 opacity-70">
+                        [Doble-Clic] Añadir | [Clic-Derecho] Eliminar
+                    </div>
+                </div>
+            </div>
+
+            <!-- Terminal Logs -->
+            <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm h-48 flex flex-col">
+                <h2 class="text-sm font-bold text-slate-500 mb-2">📡 Monitor de Señales</h2>
+                <div id="terminal-logs"
+                    class="bg-slate-900 text-emerald-400 font-mono text-xs p-3 rounded-lg overflow-y-auto flex-1 custom-scrollbar whitespace-pre-wrap leading-relaxed">
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+
+    <!-- Modals -->
+    <div id="telemetry-modal"
+        class="fixed inset-0 bg-slate-900 bg-opacity-50 hidden items-center justify-center z-50 backdrop-blur-sm">
+        <div
+            class="bg-white rounded-xl shadow-2xl w-full max-w-md flex flex-col border border-slate-200 overflow-hidden transform transition-all">
+            <div class="bg-slate-50 px-6 py-4 flex justify-between items-center border-b border-slate-200">
+                <h3 class="text-lg font-bold text-blue-600" id="modal-title">Telemetría - AMB-000</h3>
+                <button id="btn-close-modal" class="text-slate-400 hover:text-slate-600 focus:outline-none">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12">
+                        </path>
+                    </svg>
+                </button>
+            </div>
+            <div class="p-6 bg-slate-900 text-emerald-400 font-mono text-xs overflow-y-auto max-h-96 custom-scrollbar">
+                <pre id="modal-json"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+
+</html>
