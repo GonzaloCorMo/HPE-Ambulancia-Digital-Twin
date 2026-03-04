@@ -53,9 +53,19 @@ async def state_broadcaster():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Pre-cache graph asynchronously to avoid blocking first UI render
+    def preload_graph():
+        from telemetry.logistics import get_city_graph
+        try:
+            get_city_graph()
+        except Exception as e:
+            engine.log_network(f"[SISTEMA] Aviso: {e}")
+            
+    asyncio.get_running_loop().run_in_executor(None, preload_graph)
+    
     # Startup
     task = asyncio.create_task(state_broadcaster())
-    engine.log_network("[SERVER] Simulador asíncrono e inicializado.")
+    engine.log_network("[SERVER] Simulador asíncrono e inicializado. Cargando mapas en background...")
     yield
     # Shutdown
     task.cancel()
@@ -128,6 +138,14 @@ async def api_delete(req: DeleteRequest):
 async def api_toggle_playback():
     engine.toggle_playback()
     return {"is_simulating": engine.is_simulating}
+
+@app.get("/api/route/{amb_id}")
+async def api_get_route(amb_id: str):
+    if amb_id in engine.ambulances:
+        geom = engine.ambulances[amb_id].logistics.route_geometry
+        step = engine.ambulances[amb_id].logistics.route_step
+        return {"route": geom, "step": step}
+    return {"route": [], "step": 0}
 
 @app.post("/api/control/clear")
 async def api_clear():

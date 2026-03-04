@@ -1,5 +1,9 @@
 import asyncio
+import warnings
 from amqtt.broker import Broker
+
+# Suppress AMQTT legacy deprecation warnings printed to terminal
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # This script acts as a lightweight standalone MQTT broker
 # just in case Mosquitto is not installed on the system, for easy testing.

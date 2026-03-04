@@ -72,7 +72,7 @@ class SimulatorEngine:
                     min_h_dist_km = min_h_dist * 111.0
                     
                     total_dist_km = dist_to_em_km + min_h_dist_km
-                    fuel_cost = (total_dist_km * 5.0) * 1.5 + 5.0 # 1.5 multiplier + buffer
+                    fuel_cost = (total_dist_km * 0.15) * 1.5 + 2.0 # 1.5 multiplier + buffer for endurance tuning
                     
                     has_enough_fuel = amb.mechanical.fuel_level >= fuel_cost
                     if has_enough_fuel:
@@ -97,85 +97,82 @@ class SimulatorEngine:
                 time.sleep(0.5)
                 continue
                 
-            for em_id, em in list(self.active_emergencies.items()):
-                if em["status"] == "PROCESSING":
-                    # Find the assigned ambulance that reached THIS emergency
-                    amb_id = em.get("assigned_ambulance")
-                    if amb_id and amb_id in self.ambulances:
-                        amb = self.ambulances[amb_id]
-                        if amb.logistics.mission_status == "IN_USE" and amb.logistics.destination_type == "EMERGENCY":
-                            if amb.logistics.destination is None and abs(amb.logistics.lat - em["lat"]) < 0.001 and abs(amb.logistics.lon - em["lon"]) < 0.001:
-                                amb.vitals.has_patient = True 
-                                self.log_network(f"[DISPATCHER] 🏥 Unidad {amb.id} estabilizando a paciente en escena. Buscando Hospital cercano...")
-                                
-                                hospitals = [p for p in POIS if p["type"] == "HOSPITAL"]
-                                if hospitals:
-                                    # Load balancing calculation
-                                    hospital_loads = { (h["lat"], h["lon"]): 0 for h in hospitals }
-                                    for fleet_amb in list(self.ambulances.values()):
-                                        dest = fleet_amb.logistics.destination
-                                        if dest and fleet_amb.logistics.destination_type == "HOSPITAL":
-                                            if dest in hospital_loads: hospital_loads[dest] += 1
+            try:
+                for em_id, em in list(self.active_emergencies.items()):
+                    if em["status"] == "PROCESSING":
+                        # Find the assigned ambulance that reached THIS emergency
+                        amb_id = em.get("assigned_ambulance")
+                        if amb_id and amb_id in self.ambulances:
+                            amb = self.ambulances[amb_id]
+                            if amb.logistics.mission_status == "IN_USE" and amb.logistics.destination_type == "EMERGENCY":
+                                if amb.logistics.destination is None and abs(amb.logistics.lat - em["lat"]) < 0.002 and abs(amb.logistics.lon - em["lon"]) < 0.002:
+                                    amb.vitals.has_patient = True 
+                                    self.log_network(f"[DISPATCHER] 🏥 Unidad {amb.id} estabilizando a paciente en escena. Buscando Hospital cercano...")
                                     
-                                    best_h = min(hospitals, key=lambda h: (hospital_loads.get((h["lat"], h["lon"]), 0), math.sqrt((amb.logistics.lat - h["lat"])**2 + (amb.logistics.lon - h["lon"])**2)))
+                                    hospitals = [p for p in POIS if p["type"] == "HOSPITAL"]
+                                    if hospitals:
+                                        # Load balancing calculation using safe distance matching to avoid float dict key errors
+                                        best_h = min(hospitals, key=lambda h: math.sqrt((amb.logistics.lat - h["lat"])**2 + (amb.logistics.lon - h["lon"])**2))
+                                        
+                                        dist_info = math.sqrt((amb.logistics.lat - best_h["lat"])**2 + (amb.logistics.lon - best_h["lon"])**2) * 111.0
+                                        self.log_network(f"[DISPATCHER] 🏥 Unidad {amb.id} transportando al Hospital [Dist: {dist_info:.2f} km].")
+                                        
+                                        amb.logistics.set_destination(best_h["lat"], best_h["lon"], "HOSPITAL")
+                                        amb.logistics.action_message = "Transportando al Hospital"
+                                        em["status"] = "TRANSPORTING"
                                     
-                                    dist_info = math.sqrt((amb.logistics.lat - best_h["lat"])**2 + (amb.logistics.lon - best_h["lon"])**2) * 111.0
-                                    self.log_network(f"[DISPATCHER] 🏥 Unidad {amb.id} transportando al Hospital [Dist: {dist_info:.2f} km].")
+                    elif em["status"] == "TRANSPORTING":
+                        # Check if reached hospital
+                        amb_id = em.get("assigned_ambulance")
+                        if amb_id and amb_id in self.ambulances:
+                            amb = self.ambulances[amb_id]
+                            if amb.logistics.mission_status == "IN_USE" and amb.vitals.has_patient and amb.logistics.destination_type == "HOSPITAL":
+                                if amb.logistics.destination is None:
+                                    # We assume this transport corresponds to the emergency in transporting state
+                                    amb.logistics.mission_status = "ACTIVE"
+                                    amb.vitals.has_patient = False
+                                    amb.logistics.action_message = "Esperando asignación"
                                     
-                                    amb.logistics.set_destination(best_h["lat"], best_h["lon"], "HOSPITAL")
-                                    amb.logistics.action_message = "Transportando al Hospital" # Added action_message
-                                    em["status"] = "TRANSPORTING"
-                                
-                elif em["status"] == "TRANSPORTING":
-                    # Check if reached hospital
-                    amb_id = em.get("assigned_ambulance")
-                    if amb_id and amb_id in self.ambulances:
-                        amb = self.ambulances[amb_id]
-                        if amb.logistics.mission_status == "IN_USE" and amb.vitals.has_patient and amb.logistics.destination_type == "HOSPITAL":
-                            if amb.logistics.destination is None:
-                                # We assume this transport corresponds to the emergency in transporting state
-                                amb.logistics.mission_status = "ACTIVE"
-                                amb.vitals.has_patient = False
-                                amb.logistics.action_message = "Esperando asignación" # Added action_message
-                                
-                                em["status"] = "RESOLVED"
-                                if em["id"] in self.active_emergencies:
-                                    del self.active_emergencies[em["id"]]
-                                    
-                                self.log_network(f"[URGENCIA {em['id']}] Estado: RESOLVED. Paciente ingresado con éxito por Unidad {amb.id}.")
-                                self.evaluate_fleet_assignments()
+                                    em["status"] = "RESOLVED"
+                                    if em["id"] in self.active_emergencies:
+                                        del self.active_emergencies[em["id"]]
+                                        
+                                    self.log_network(f"[URGENCIA {em['id']}] Estado: RESOLVED. Paciente ingresado con éxito por Unidad {amb.id}.")
+                                    self.evaluate_fleet_assignments()
+
+            except Exception as e:
+                self.log_network(f"[DISPATCH ERROR] Bucle de control falló: {e}")
+                import traceback
+                traceback.print_exc()
 
             time.sleep(0.1) # 10 Hz refresh to cleanly catch triggers instantly
                     
         # 2. Free ambulances without a destination should dock at a hospital
-        for am_id, amb in list(self.ambulances.items()):
-           if amb.logistics.mission_status == "ACTIVE" and amb.logistics.destination is None:
-               docked = False
-               has_unassigned = any(e["status"] == "INITIATED" for e in self.active_emergencies.values())
-               hospitals = [p for p in POIS if p["type"] == "HOSPITAL"]
-               
-               for h in hospitals:
-                   if abs(amb.logistics.lat - h["lat"]) < 0.006 and abs(amb.logistics.lon - h["lon"]) < 0.006:
-                       docked = True
-                       break
-               
-               if not docked and not has_unassigned and hospitals:
-                    # Find least busy hospital
-                    hospital_loads = { (h["lat"], h["lon"]): 0 for h in hospitals }
-                    for fleet_amb in list(self.ambulances.values()):
-                         dest = fleet_amb.logistics.destination
-                         d_type = fleet_amb.logistics.destination_type
-                         if dest and d_type == "HOSPITAL":
-                              if dest in hospital_loads: hospital_loads[dest] += 1
-                         elif not dest and fleet_amb.logistics.mission_status == "ACTIVE":
-                              for h_latlon in hospital_loads.keys():
-                                   if abs(fleet_amb.logistics.lat - h_latlon[0]) < 0.006 and abs(fleet_amb.logistics.lon - h_latlon[1]) < 0.006:
-                                        hospital_loads[h_latlon] += 1
-                                        
-                    # Tie-break minimal load with distance
-                    best_h = min(hospitals, key=lambda h: (hospital_loads.get((h["lat"], h["lon"]), 0), math.sqrt((amb.logistics.lat - h["lat"])**2 + (amb.logistics.lon - h["lon"])**2)))
-                    amb.logistics.set_destination(best_h["lat"], best_h["lon"], "HOSPITAL")
-                    self.log_network(f"[SISTEMA] {amb.id} retira a base hospitalaria (Carga Actual: {hospital_loads.get((best_h['lat'], best_h['lon']), 0)}).")
+        # Note: This runs outside the emergency loop.
+        if self.is_simulating:
+            for am_id, amb in list(self.ambulances.items()):
+               if amb.logistics.mission_status == "ACTIVE" and amb.logistics.destination is None:
+                   hospitals = [p for p in POIS if p["type"] == "HOSPITAL"]
+                   
+                   # Am I already at a hospital?
+                   docked = False
+                   for h in hospitals:
+                       if abs(amb.logistics.lat - h["lat"]) < 0.003 and abs(amb.logistics.lon - h["lon"]) < 0.003:
+                           docked = True
+                           amb.logistics.action_message = "Estacionada en Base"
+                           break
+                   
+                   if not docked and hospitals:
+                       # Load balancing calculation finding nearest idle spot
+                       hospital_loads = { (h["lat"], h["lon"]): 0 for h in hospitals }
+                       for fleet_amb in list(self.ambulances.values()):
+                           dest = fleet_amb.logistics.destination
+                           if dest and fleet_amb.logistics.destination_type == "BASE":
+                               if dest in hospital_loads: hospital_loads[dest] += 1
+                               
+                       best_h = min(hospitals, key=lambda h: (hospital_loads.get((h["lat"], h["lon"]), 0), math.sqrt((amb.logistics.lat - h["lat"])**2 + (amb.logistics.lon - h["lon"])**2)))
+                       amb.logistics.set_destination(best_h["lat"], best_h["lon"], "BASE")
+                       amb.logistics.action_message = "Regresando a Base"
 
     def update_speed_multiplier(self, val):
         self.speed_multiplier = val

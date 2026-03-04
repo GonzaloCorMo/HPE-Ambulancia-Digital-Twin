@@ -1,8 +1,13 @@
 import random
 import math
+import osmnx as ox
+import networkx as nx
+import threading
 
 # Shared Global State for dynamic map elements
 POIS = []
+
+GRAPH_LOCK = threading.Lock()
 
 # Jams are geofenced circles: {"lat": ..., "lon": ..., "radius": 0.005}
 JAMS = []
@@ -14,6 +19,30 @@ def add_jam(lat, lon, radius=0.005):
     JAMS.append({"lat": lat, "lon": lon, "radius": radius})
 
 ROUTE_CACHE = {}
+CITY_GRAPH = None
+
+def get_city_graph():
+    global CITY_GRAPH
+    if CITY_GRAPH is None:
+        with GRAPH_LOCK:
+            if CITY_GRAPH is None:
+                import os
+                graph_path = "madrid_sim_graph.graphml"
+                if os.path.exists(graph_path):
+                    print("[SISTEMA] Cargando red viaria local desde disco...")
+                    CITY_GRAPH = ox.load_graphml(graph_path)
+                    print("[SISTEMA] Grafo físico cargado exitosamente.")
+                else:
+                    print("[SISTEMA] Descargando red viaria de Madrid (Puede tardar la primera vez)...")
+                    # 5km covers the inner tactical city rapidly.
+                    raw_graph = ox.graph_from_point((40.4168, -3.7038), dist=5000, network_type='drive')
+                    # Guarantee purely contiguous network mathematically
+                    largest_scc = max(nx.strongly_connected_components(raw_graph), key=len)
+                    CITY_GRAPH = raw_graph.subgraph(largest_scc).copy()
+                    
+                    ox.save_graphml(CITY_GRAPH, graph_path)
+                    print("[SISTEMA] Grafo guardado en disco y cargado.")
+    return CITY_GRAPH
 
 class LogisticsEngine:
     def __init__(self, start_lat=40.4168, start_lon=-3.7038):
@@ -38,25 +67,33 @@ class LogisticsEngine:
         self.route_step = 0
         
         # Build strict cache key
-        cache_key = f"{round(self.lon, 4)},{round(self.lat, 4)}_{round(lon, 4)},{round(lat, 4)}"
+        cache_key = f"{round(self.lon, 6)},{round(self.lat, 6)}_{round(lon, 6)},{round(lat, 6)}"
         
         if cache_key in ROUTE_CACHE:
             self.route_geometry = ROUTE_CACHE[cache_key].copy()
             return
 
         try:
-            import urllib.request, json
-            url = f"https://router.project-osrm.org/route/v1/driving/{self.lon},{self.lat};{lon},{lat}?overview=full&geometries=geojson"
-            req = urllib.request.Request(url, headers={'User-Agent': 'AmbulanceTwin/1.0'})
-            with urllib.request.urlopen(req, timeout=2) as response:
-                data = json.loads(response.read().decode())
-                if data.get("routes") and len(data["routes"]) > 0:
-                    coords = data["routes"][0]["geometry"]["coordinates"]
-                    self.route_geometry = [(c[1], c[0]) for c in coords] # Store as (lat, lon)
-                    ROUTE_CACHE[cache_key] = self.route_geometry.copy()
+            G = get_city_graph()
+            orig_node = ox.distance.nearest_nodes(G, self.lon, self.lat)
+            dest_node = ox.distance.nearest_nodes(G, lon, lat)
+            
+            route_nodes = nx.shortest_path(G, orig_node, dest_node, weight='length')
+            
+            coords = []
+            for node_id in route_nodes:
+                n_data = G.nodes[node_id]
+                coords.append((n_data['y'], n_data['x'])) # Store as (lat, lon)
+                
+            # EXACT SNAPPING: Force the final coordinate to precisely match the target POI.
+            # This prevents infinite route recalculation at the docking thresholds.
+            coords.append((lat, lon))
+            
+            self.route_geometry = coords
+            ROUTE_CACHE[cache_key] = self.route_geometry.copy()
         except Exception as e:
-            print(f"OSRM Route fetch error: {e}")
-            self.route_geometry = [(self.lat, self.lon), (lat, lon)]
+            print(f"Offline Route fetch error: {e}")
+            self.route_geometry = [] # STRICT PATHING: No straight line fallbacks.
 
     def route_to_nearest(self, dest_type):
         best, min_d = None, 999999
@@ -97,11 +134,6 @@ class LogisticsEngine:
         target_speed = 80.0
         if in_jam:
             target_speed = 10.0
-            
-            # Smart Routing: If jammed and heading to hospital, find alternative
-            if self.speed < 15.0 and self.destination_type == "HOSPITAL":
-                if random.random() < 0.2 * adjusted_dt: # 20% chance per second to realize and detour
-                    self.route_to_alternative("HOSPITAL")
 
         if self.destination and getattr(self, "route_geometry", None):
             if self.speed < target_speed:
@@ -143,6 +175,17 @@ class LogisticsEngine:
             self.acceleration = 0.0
             self.speed = max(0, self.speed - 5.0 * adjusted_dt)
             self.action_message = "Calculando ruta OSRM..."
+            
+            if not hasattr(self, '_route_retry_timer'):
+                self._route_retry_timer = 0.0
+            self._route_retry_timer += adjusted_dt
+            
+            if self._route_retry_timer > 2.0:
+                self._route_retry_timer = 0.0
+                self.action_message = "Reintentando conexión GPS..."
+                # Re-fetch attempts blocking.
+                self.set_destination(self.destination[0], self.destination[1], self.destination_type)
+            
             
         else:
             self.acceleration = 0.0

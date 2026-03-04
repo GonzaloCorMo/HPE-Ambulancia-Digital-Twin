@@ -93,23 +93,20 @@ function updateMap() {
                     delete activeRoutes[id];
                 }
 
-                const cacheKey = `${lon.toFixed(4)},${lat.toFixed(4)};${amb.logistics.destination_lon.toFixed(4)},${amb.logistics.destination_lat.toFixed(4)}`;
-
-                if (routeCache[cacheKey]) {
-                    markerRefs.ambulances[id]._routeCoords = routeCache[cacheKey];
+                if (routeCache[destKey]) {
+                    markerRefs.ambulances[id]._routeCoords = routeCache[destKey];
                 } else {
-                    const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${lon},${lat};${amb.logistics.destination_lon},${amb.logistics.destination_lat}?overview=full&geometries=geojson`;
-                    fetch(osrmUrl)
+                    fetch(`/api/route/${id}`)
                         .then(r => r.json())
                         .then(data => {
-                            if (data.routes && data.routes.length > 0) {
-                                const coords = data.routes[0].geometry.coordinates; // Array of [lon, lat]
-                                routeCache[cacheKey] = coords;
+                            if (data.route && data.route.length > 0) {
+                                const coords = data.route; // backend sends [lat, lon] natively now
+                                routeCache[destKey] = coords;
                                 if (markerRefs.ambulances[id]._currentDestKey === destKey) {
                                     markerRefs.ambulances[id]._routeCoords = coords;
                                 }
                             }
-                        }).catch(e => console.error("OSRM Route Error:", e));
+                        }).catch(e => console.error("Offline Route Error:", e));
                 }
             }
 
@@ -119,7 +116,7 @@ function updateMap() {
                 let sliced = markerRefs.ambulances[id]._routeCoords.slice(step);
 
                 if (sliced.length > 0) {
-                    let latlngs = sliced.map(c => [c[1], c[0]]); // Leaflet uses [lat, lon]
+                    let latlngs = sliced.map(c => [c[0], c[1]]); // Backend sends [lat, lon], Leaflet needs [lat, lon]
                     latlngs.unshift([lat, lon]); // Hook visually to the current ambulance position
 
                     if (activeRoutes[id]) {
