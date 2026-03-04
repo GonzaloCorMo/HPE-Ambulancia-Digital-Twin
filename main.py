@@ -7,17 +7,17 @@ from comms.p2p_mesh import P2PMeshHandler
 
 # Orquestador Principal de Simulación
 
-def launch_ambulance(am_id, start_lat, start_lon, broker_url):
-    twin = AmbulanceTwin(am_id)
+def launch_ambulance(am_id, start_lat, start_lon, broker_url, log_callback=None):
+    twin = AmbulanceTwin(am_id, log_callback=log_callback)
     
     # Configurar posición inicial
     twin.logistics.lat = start_lat
     twin.logistics.lon = start_lon
     
     # Inyectar dependencias de comunicación
-    twin.mqtt_client = MQTTHandler(broker=broker_url)
+    twin.mqtt_client = MQTTHandler(broker=broker_url, log_callback=log_callback)
     twin.https_client = HTTPSHandler(base_url="http://localhost:8000")
-    twin.p2p_mesh = P2PMeshHandler(port=5005) # Todos usan el mismo puerto UDP para broadcast
+    twin.p2p_mesh = P2PMeshHandler(port=5005, log_callback=log_callback) # Todos usan el mismo puerto UDP para broadcast
     
     # Encender módulos de red
     twin.mqtt_client.connect()

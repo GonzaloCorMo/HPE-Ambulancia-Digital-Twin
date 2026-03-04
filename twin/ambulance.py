@@ -6,8 +6,9 @@ from telemetry.vitals import VitalsEngine
 from telemetry.logistics import LogisticsEngine
 
 class AmbulanceTwin:
-    def __init__(self, am_id=None):
+    def __init__(self, am_id=None, log_callback=None):
         self.id = am_id or str(uuid.uuid4())
+        self.log_callback = log_callback
         self.mechanical = MechanicalEngine()
         self.vitals = VitalsEngine()
         self.logistics = LogisticsEngine()
@@ -42,6 +43,11 @@ class AmbulanceTwin:
             # 1. Step simulations (dt = 1.0 second)
             mech_state = self.mechanical.step(dt=1.0)
             vit_state = self.vitals.step(dt=1.0)
+            
+            if self.mechanical.is_refueling:
+                self.logistics.speed = 0.0
+                self.logistics.acceleration = 0.0
+
             log_state = self.logistics.step(dt=1.0)
             
             # 2. Aggregate State
@@ -53,13 +59,16 @@ class AmbulanceTwin:
                 "logistics": log_state
             }
             
-            # 3. Communications (Publish to MQTT every second)
-            # We will implement this logic once comms modules are ready
-            if self.mqtt_client:
+            # 3. Communications
+            if self.mqtt_client and self.mqtt_client.is_connected():
+                if self.log_callback:
+                    self.log_callback(f"[{self.id}] \u2192 MQTT: Publishing State")
                 self.mqtt_client.publish_state(self.id, self.current_state)
                 
             # 3b. Fallback to P2P if MQTT is down
-            if self.mqtt_client and not self.mqtt_client.is_connected() and self.p2p_mesh:
+            elif self.p2p_mesh:
+                if self.log_callback:
+                    self.log_callback(f"[{self.id}] \u2192 P2P BROADCAST: State Fallback")
                 self.p2p_mesh.broadcast_state(self.current_state)
 
             # 4. HTTPS Backup (Every 10 seconds)

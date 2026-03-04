@@ -9,6 +9,7 @@ class LogisticsEngine:
         self.heading = random.uniform(0, 360) # degrees
         self.acceleration = 0.0 # m/s^2
         self.destination = None
+        self.road_type = "urban"
         
     def set_destination(self, lat, lon):
         self.destination = (lat, lon)
@@ -43,16 +44,27 @@ class LogisticsEngine:
         self.lat += (distance_km * math.cos(math.radians(self.heading))) / 111.0
         self.lon += (distance_km * math.sin(math.radians(self.heading))) / (111.0 * math.cos(math.radians(self.lat)))
 
+        if random.random() < 0.05 * dt:
+            self.road_type = random.choice(["urban", "highway", "suburban", "rural"])
+
         return self.get_state()
 
     def get_state(self):
+        traffic_status = "clear"
+        if self.speed > 0 and self.speed < 20 and self.destination:
+            traffic_status = "heavy"
+        elif self.speed >= 20 and self.speed < 50:
+            traffic_status = "moderate"
+            
         return {
             "latitude": round(self.lat, 6),
             "longitude": round(self.lon, 6),
             "speed": round(self.speed, 2),
             "heading": round(self.heading, 2),
             "acceleration": round(self.acceleration, 2),
-            "has_destination": self.destination is not None
+            "has_destination": self.destination is not None,
+            "traffic_status": traffic_status,
+            "road_type": self.road_type
         }
 
     def inject_interference(self, interference_type):

@@ -2,9 +2,10 @@ import paho.mqtt.client as mqtt
 import json
 
 class MQTTHandler:
-    def __init__(self, broker="localhost", port=1883):
+    def __init__(self, broker="localhost", port=1883, log_callback=None):
         self.broker = broker
         self.port = port
+        self.log_callback = log_callback
         self.client = mqtt.Client()
         self.client.on_connect = self.on_connect
         self.client.on_disconnect = self.on_disconnect
@@ -15,18 +16,26 @@ class MQTTHandler:
             self.client.connect(self.broker, self.port, 60)
             self.client.loop_start()
         except Exception as e:
-            print(f"[MQTT] Failed to connect to broker: {e}")
+            msg = f"[MQTT] Failed to connect to broker: {e}"
+            if self.log_callback: self.log_callback(msg)
+            else: print(msg)
             self.connected = False
 
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
-            print("[MQTT] Connected to Central Broker")
+            msg = "[MQTT] Connected to Central Broker 🟢"
+            if self.log_callback: self.log_callback(msg)
+            else: print(msg)
             self.connected = True
         else:
-            print(f"[MQTT] Connection failed with code {rc}")
+            msg = f"[MQTT] Connection failed with code {rc} 🔴"
+            if self.log_callback: self.log_callback(msg)
+            else: print(msg)
 
     def on_disconnect(self, client, userdata, rc):
-        print("[MQTT] Disconnected from Central Broker")
+        msg = "[MQTT] Disconnected from Central Broker 🔴"
+        if self.log_callback: self.log_callback(msg)
+        else: print(msg)
         self.connected = False
 
     def is_connected(self):

@@ -4,8 +4,9 @@ import threading
 import time
 
 class P2PMeshHandler:
-    def __init__(self, port=5005):
+    def __init__(self, port=5005, log_callback=None):
         self.port = port
+        self.log_callback = log_callback
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         
         # Permitir reutilizar el puerto para que múltiples ambulancias en el mismo PC no choquen
@@ -24,7 +25,9 @@ class P2PMeshHandler:
         self.running = True
         self.listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
         self.listen_thread.start()
-        print(f"[P2P] Mesh activated, listening on UDP {self.port}")
+        msg = f"[P2P] Mesh activated, UDP {self.port} 📡"
+        if self.log_callback: self.log_callback(msg)
+        else: print(msg)
 
     def stop(self):
         self.running = False
@@ -37,7 +40,9 @@ class P2PMeshHandler:
             payload = json.dumps(state_dict).encode("utf-8")
             self.sock.sendto(payload, ('<broadcast>', self.port))
         except Exception as e:
-            print(f"[P2P] Broadcast error: {e}")
+            msg = f"[P2P] Broadcast error: {e}"
+            if self.log_callback: self.log_callback(msg)
+            else: print(msg)
 
     def _listen_loop(self):
         while self.running:
@@ -52,8 +57,8 @@ class P2PMeshHandler:
                         "last_seen": time.time(),
                         "ip": addr[0]
                     }
-                    # Minimal log to show peer communication working
-                    # print(f"[P2P] Heard from peer: {am_id} at {addr[0]}")
+                    if self.log_callback:
+                        self.log_callback(f"[P2P] Heard from peer: {am_id}")
             except socket.error:
                 # Socket closed or error
                 break
