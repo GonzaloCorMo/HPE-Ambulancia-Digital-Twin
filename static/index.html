@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ambulance Digital Twin</title>
+    <title>Centro de Operaciones - Gemelo Digital de Ambulancias</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Socket.IO -->
@@ -16,179 +16,869 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
+    <!-- Chart.js para visualizaciones -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
     <link rel="stylesheet" href="/style.css">
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+        
+        :root {
+            --color-primary: #3b82f6;
+            --color-primary-dark: #2563eb;
+            --color-success: #10b981;
+            --color-warning: #f59e0b;
+            --color-danger: #ef4444;
+            --color-info: #8b5cf6;
+        }
+        
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        
+        .stat-card-gradient {
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+        }
+        
+        .gradient-primary {
+            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+        }
+        
+        .gradient-success {
+            background: linear-gradient(135deg, #10b981 0%, #047857 100%);
+        }
+        
+        .gradient-warning {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        }
+        
+        .gradient-danger {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+        }
+        
+        .glass-effect {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .shadow-soft {
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        
+        .shadow-medium {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        
+        .shadow-hard {
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+        }
+        
+        .border-glow {
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.3);
+        }
+        
+        .animate-float {
+            animation: float 6s ease-in-out infinite;
+        }
+        
+        @keyframes float {
+            0% { transform: translateY(0px); }
+            50% { transform: translateY(-10px); }
+            100% { transform: translateY(0px); }
+        }
+        
+        .pulse-ring {
+            animation: pulse-ring 2s infinite;
+        }
+        
+        @keyframes pulse-ring {
+            0% { transform: scale(0.8); opacity: 0.8; }
+            100% { transform: scale(1.5); opacity: 0; }
+        }
+    </style>
 </head>
 
-<body class="bg-slate-50 text-slate-800 font-sans h-screen flex flex-col overflow-hidden">
+<body class="bg-gradient-to-br from-slate-50 to-blue-50 text-slate-800 font-sans h-screen flex flex-col overflow-hidden">
 
     <!-- Navbar -->
-    <header class="bg-white border-b border-slate-200 px-6 py-4 flex items-center shadow-sm z-10">
-        <h1 class="text-2xl font-bold text-blue-600 uppercase tracking-wide">
-            Centro de Operaciones - Despacho y Control
-        </h1>
-        <div class="ml-auto flex space-x-4">
-            <div id="connection-status" class="flex items-center text-sm font-semibold text-red-500">
-                <span class="w-3 h-3 rounded-full bg-red-500 mr-2 animate-pulse"></span> Offline
+    <header class="bg-white/80 backdrop-blur-md border-b border-slate-200 px-6 py-4 flex items-center shadow-soft z-20">
+        <div class="flex items-center space-x-3">
+            <div class="p-2 bg-blue-600 rounded-lg shadow-md">
+                <i class="fas fa-ambulance text-white text-xl"></i>
+            </div>
+            <div>
+                <h1 class="text-2xl font-bold text-blue-600 tracking-tight">Centro de Operaciones</h1>
+                <p class="text-sm text-slate-500 font-medium">Sistema de Gemelos Digitales de Ambulancias</p>
+            </div>
+        </div>
+        
+        <!-- Connection Status & Stats -->
+        <div class="ml-auto flex items-center space-x-6">
+            <!-- System Stats -->
+            <div class="hidden md:flex items-center space-x-4">
+                <div class="text-center px-3 py-1 bg-blue-50 rounded-lg border border-blue-100">
+                    <div class="text-xs font-semibold text-blue-500">AMBULANCIAS</div>
+                    <div id="stats-ambulances" class="text-lg font-bold text-blue-700">0</div>
+                </div>
+                <div class="text-center px-3 py-1 bg-red-50 rounded-lg border border-red-100">
+                    <div class="text-xs font-semibold text-red-500">URGENCIAS</div>
+                    <div id="stats-emergencies" class="text-lg font-bold text-red-700">0</div>
+                </div>
+                <div class="text-center px-3 py-1 bg-emerald-50 rounded-lg border border-emerald-100">
+                    <div class="text-xs font-semibold text-emerald-500">RESUELTAS</div>
+                    <div id="stats-resolved" class="text-lg font-bold text-emerald-700">0</div>
+                </div>
+            </div>
+            
+            <!-- Connection Status -->
+            <div id="connection-status" class="flex items-center text-sm font-semibold text-red-500 bg-red-50 px-3 py-1.5 rounded-lg border border-red-100">
+                <div class="relative mr-2">
+                    <span class="w-3 h-3 rounded-full bg-red-500 block"></span>
+                    <span class="absolute inset-0 w-3 h-3 rounded-full bg-red-500 animate-ping opacity-75"></span>
+                </div>
+                <span>Conectando...</span>
+            </div>
+            
+            <!-- Time & Speed -->
+            <div class="hidden lg:flex flex-col text-right">
+                <div class="text-sm font-semibold text-slate-600" id="current-time">--:--:--</div>
+                <div class="text-xs text-slate-500" id="speed-indicator">Velocidad: <span class="font-semibold text-blue-600">1x</span></div>
             </div>
         </div>
     </header>
 
     <!-- Main Content -->
-    <div class="flex flex-1 overflow-hidden p-6 gap-6">
-
-        <!-- Left Panel: Controls & Fleet -->
-        <div class="w-1/3 flex flex-col gap-6 overflow-hidden">
-
-            <!-- System Controls -->
-            <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-                <h2 class="text-lg font-bold text-blue-600 mb-4 border-b border-slate-100 pb-2">⚙️ Control del Simulador
-                </h2>
-
-                <div class="flex gap-2 mb-4">
-                    <button id="btn-play"
-                        class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-2 px-4 rounded transition border border-slate-200 shadow-sm">
-                        ▶️ INICIAR
-                    </button>
-                    <button id="btn-clear"
-                        class="flex-1 bg-red-100 hover:bg-red-200 text-red-700 font-bold py-2 px-4 rounded transition border border-red-200 shadow-sm">
-                        🗑️ BORRAR MAPA
-                    </button>
-                </div>
-
-                <div class="mb-4">
-                    <label class="block text-sm font-bold text-slate-600 mb-1">Multiplicador de Tiempo: <span
-                            id="speed-label" class="text-blue-600">1x</span></label>
-                    <input type="range" id="slider-speed" min="1" max="10" value="1" class="w-full accent-blue-600">
-                </div>
-
-                <div class="grid grid-cols-2 gap-2 text-sm font-semibold">
-                    <label class="flex items-center space-x-2">
-                        <input type="checkbox" id="chk-mqtt" checked class="w-4 h-4 text-blue-600 rounded">
-                        <span>Centralita (MQTT)</span>
-                    </label>
-                    <label class="flex items-center space-x-2">
-                        <input type="checkbox" id="chk-p2p" checked class="w-4 h-4 text-blue-600 rounded">
-                        <span>Malla Local (P2P)</span>
-                    </label>
-                    <label class="flex items-center space-x-2">
-                        <input type="checkbox" id="chk-http" checked class="w-4 h-4 text-blue-600 rounded">
-                        <span>Backup Backend (HTTP)</span>
-                    </label>
-                    <label class="flex items-center space-x-2">
-                        <input type="checkbox" id="chk-route-em" checked
-                            class="w-4 h-4 text-red-600 rounded accent-red-600">
-                        <span>Rutas Urgencia (Rojo)</span>
-                    </label>
-                    <label class="flex items-center space-x-2">
-                        <input type="checkbox" id="chk-route-hosp" checked
-                            class="w-4 h-4 text-emerald-600 rounded accent-emerald-600">
-                        <span>Rutas Hospital (Verde)</span>
-                    </label>
-                    <label class="flex items-center space-x-2 col-span-2">
-                        <input type="checkbox" id="chk-route-gas" checked
-                            class="w-4 h-4 text-amber-500 rounded accent-amber-500">
-                        <span>Rutas Gasolinera (Amarillo)</span>
-                    </label>
-                </div>
-            </div>
-
-            <!-- Fleet Overview -->
-            <div
-                class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex-1 flex flex-col h-full overflow-hidden min-h-0">
-                <h2 class="text-lg font-bold text-blue-600 mb-4 border-b border-slate-100 pb-2">🚑 Estado de la Flota
-                </h2>
-                <div id="fleet-container" class="overflow-y-auto pr-2 space-y-3 flex-1 custom-scrollbar">
-                    <!-- Dynamic ambulance cards go here -->
-                </div>
-            </div>
-
-        </div>
-
-        <!-- Right Panel: Map & Logs -->
-        <div class="w-2/3 flex flex-col gap-6">
-
-            <!-- Map Container -->
-            <div
-                class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col relative flex-1 min-h-0">
-                <div class="flex justify-between items-center mb-4 border-b border-slate-100 pb-2">
-                    <div class="flex items-center gap-3">
-                        <h2 class="text-lg font-bold text-blue-600">🗺️ Radar Táctico de Posicionamiento</h2>
-                        <div
-                            class="flex bg-slate-100 rounded border border-slate-200 overflow-hidden shadow-inner text-sm">
-                            <input type="text" id="city-search" placeholder="Buscar ciudad..."
-                                class="px-2 py-1 outline-none bg-transparent w-40 text-slate-700">
-                            <button id="btn-search-city"
-                                class="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-600 transition">🔍</button>
+    <div class="flex flex-1 overflow-hidden">
+        
+        <!-- Left Sidebar - Stats & Quick Actions -->
+        <div class="w-64 xl:w-72 bg-white/80 backdrop-blur-sm border-r border-slate-200 flex flex-col overflow-hidden">
+            
+            <!-- Quick Stats -->
+            <div class="p-5 border-b border-slate-200">
+                <h2 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">📊 ESTADO DEL SISTEMA</h2>
+                
+                <div class="space-y-3">
+                    <!-- Response Time -->
+                    <div class="stat-card-gradient p-3 rounded-lg border border-slate-200 hover-card">
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <div class="text-xs font-semibold text-slate-500">TIEMPO RESPUESTA</div>
+                                <div id="stat-response-time" class="text-lg font-bold text-slate-800">-- min</div>
+                            </div>
+                            <div class="p-2 bg-blue-100 rounded-lg">
+                                <i class="fas fa-clock text-blue-600"></i>
+                            </div>
+                        </div>
+                        <div class="text-xs text-slate-400 mt-1">Promedio de atención</div>
+                    </div>
+                    
+                    <!-- Network Status -->
+                    <div class="stat-card-gradient p-3 rounded-lg border border-slate-200 hover-card">
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <div class="text-xs font-semibold text-slate-500">REDES ACTIVAS</div>
+                                <div id="stat-networks" class="text-lg font-bold text-slate-800">0/3</div>
+                            </div>
+                            <div class="p-2 bg-emerald-100 rounded-lg">
+                                <i class="fas fa-wifi text-emerald-600"></i>
+                            </div>
+                        </div>
+                        <div class="text-xs text-slate-400 mt-1">Canales de comunicación</div>
+                    </div>
+                    
+                    <!-- System Health -->
+                    <div class="stat-card-gradient p-3 rounded-lg border border-slate-200 hover-card">
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <div class="text-xs font-semibold text-slate-500">SALUD DEL SISTEMA</div>
+                                <div id="stat-health" class="text-lg font-bold text-slate-800">100%</div>
+                            </div>
+                            <div class="p-2 bg-green-100 rounded-lg">
+                                <i class="fas fa-heartbeat text-green-600"></i>
+                            </div>
+                        </div>
+                        <div class="w-full bg-slate-200 rounded-full h-1.5 mt-2">
+                            <div id="health-bar" class="bg-green-500 h-1.5 rounded-full w-full"></div>
                         </div>
                     </div>
-
-                    <!-- Mode Selector -->
-                    <div
-                        class="flex bg-slate-100 rounded-lg p-1 text-sm font-semibold shadow-inner border border-slate-200">
-                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
-                            <input type="radio" name="drawMode" value="PAN" class="hidden"> 🖐️ Desplazar
-                        </label>
-                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
-                            <input type="radio" name="drawMode" value="EMERGENCY" class="hidden" checked> 🚨 Urgencia
-                        </label>
-                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
-                            <input type="radio" name="drawMode" value="AMBULANCE" class="hidden"> 🚑 Ambulancia
-                        </label>
-                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
-                            <input type="radio" name="drawMode" value="JAM" class="hidden"> 🔴 Atasco
-                        </label>
-                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
-                            <input type="radio" name="drawMode" value="HOSPITAL" class="hidden"> 🏥 Hospital
-                        </label>
-                        <label class="cursor-pointer px-3 py-1 rounded radio-mode">
-                            <input type="radio" name="drawMode" value="GAS_STATION" class="hidden"> ⛽ Gasolinera
-                        </label>
-                    </div>
                 </div>
-
-                <div
-                    class="relative w-full flex-1 min-h-[400px] bg-slate-100 border-2 border-slate-300 rounded-lg overflow-hidden cursor-crosshair z-0">
-                    <div id="tactical-map" class="absolute inset-0 z-0"></div>
-                    <div
-                        class="absolute top-2 right-2 text-xs font-bold text-slate-400 bg-white/80 px-2 rounded-md shadow z-[1000] pointer-events-none">
-                        [Clic] Añadir | [Clic-Derecho] Eliminar
+            </div>
+            
+            <!-- Quick Actions -->
+            <div class="p-5 border-b border-slate-200">
+                <h2 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">⚡ ACCIONES RÁPIDAS</h2>
+                
+                <div class="grid grid-cols-2 gap-2">
+                    <button id="btn-quick-emergency" class="btn-danger p-2 rounded-lg flex flex-col items-center justify-center hover:shadow-md transition">
+                        <i class="fas fa-plus-circle text-lg mb-1"></i>
+                        <span class="text-xs font-semibold">Urgencia</span>
+                    </button>
+                    
+                    <button id="btn-quick-ambulance" class="btn-primary p-2 rounded-lg flex flex-col items-center justify-center hover:shadow-md transition">
+                        <i class="fas fa-ambulance text-lg mb-1"></i>
+                        <span class="text-xs font-semibold">Ambulancia</span>
+                    </button>
+                    
+                    <button id="btn-quick-hospital" class="btn-success p-2 rounded-lg flex flex-col items-center justify-center hover:shadow-md transition">
+                        <i class="fas fa-hospital text-lg mb-1"></i>
+                        <span class="text-xs font-semibold">Hospital</span>
+                    </button>
+                    
+                    <button id="btn-quick-gas" class="btn-warning p-2 rounded-lg flex flex-col items-center justify-center hover:shadow-md transition">
+                        <i class="fas fa-gas-pump text-lg mb-1"></i>
+                        <span class="text-xs font-semibold">Gasolinera</span>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- System Controls -->
+            <div class="p-5 flex-1 overflow-hidden flex flex-col">
+                <h2 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">⚙️ CONTROL DEL SIMULADOR</h2>
+                
+                <div class="space-y-4 flex-1 overflow-y-auto custom-scrollbar pr-1">
+                    <!-- Play/Pause Control -->
+                    <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <div class="flex items-center justify-between mb-3">
+                            <span class="text-sm font-semibold text-slate-700">Simulación</span>
+                            <span id="sim-status" class="text-xs font-bold px-2 py-1 rounded bg-slate-200 text-slate-700">PAUSADA</span>
+                        </div>
+                        
+                        <div class="flex gap-2">
+                            <button id="btn-play" class="flex-1 btn-primary py-2.5 rounded-lg font-bold flex items-center justify-center space-x-2">
+                                <i class="fas fa-play"></i>
+                                <span>INICIAR</span>
+                            </button>
+                            <button id="btn-clear" class="flex-1 btn-secondary py-2.5 rounded-lg font-bold flex items-center justify-center space-x-2">
+                                <i class="fas fa-trash-alt"></i>
+                                <span>LIMPIAR</span>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Speed Control -->
+                    <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <div class="flex justify-between items-center mb-2">
+                            <label class="text-sm font-semibold text-slate-700">Velocidad de Tiempo</label>
+                            <span id="speed-label" class="text-sm font-bold text-blue-600">1x</span>
+                        </div>
+                        
+                        <input type="range" id="slider-speed" min="1" max="20" value="1" class="w-full accent-blue-600 mb-1">
+                        
+                        <div class="flex justify-between text-xs text-slate-500">
+                            <span>1x</span>
+                            <span>Normal</span>
+                            <span>20x</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Network Controls -->
+                    <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <h3 class="text-sm font-semibold text-slate-700 mb-3">Redes de Comunicación</h3>
+                        
+                        <div class="space-y-2">
+                            <label class="flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 transition">
+                                <div class="flex items-center space-x-2">
+                                    <div class="w-3 h-3 rounded-full bg-emerald-500"></div>
+                                    <span class="text-sm font-medium">Centralita (MQTT)</span>
+                                </div>
+                                <input type="checkbox" id="chk-mqtt" checked class="w-4 h-4 text-blue-600 rounded">
+                            </label>
+                            
+                            <label class="flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 transition">
+                                <div class="flex items-center space-x-2">
+                                    <div class="w-3 h-3 rounded-full bg-blue-500"></div>
+                                    <span class="text-sm font-medium">Malla Local (P2P)</span>
+                                </div>
+                                <input type="checkbox" id="chk-p2p" checked class="w-4 h-4 text-blue-600 rounded">
+                            </label>
+                            
+                            <label class="flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 transition">
+                                <div class="flex items-center space-x-2">
+                                    <div class="w-3 h-3 rounded-full bg-purple-500"></div>
+                                    <span class="text-sm font-medium">Backup Backend (HTTPS)</span>
+                                </div>
+                                <input type="checkbox" id="chk-http" checked class="w-4 h-4 text-blue-600 rounded">
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- Route Display Controls -->
+                    <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <h3 class="text-sm font-semibold text-slate-700 mb-3">Mostrar Rutas</h3>
+                        
+                        <div class="grid grid-cols-2 gap-2">
+                            <label class="flex items-center space-x-2 p-2 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 transition">
+                                <input type="checkbox" id="chk-route-em" checked class="w-4 h-4 text-red-600 rounded accent-red-600">
+                                <span class="text-sm font-medium text-red-700">Urgencia</span>
+                            </label>
+                            
+                            <label class="flex items-center space-x-2 p-2 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 transition">
+                                <input type="checkbox" id="chk-route-hosp" checked class="w-4 h-4 text-emerald-600 rounded accent-emerald-600">
+                                <span class="text-sm font-medium text-emerald-700">Hospital</span>
+                            </label>
+                            
+                            <label class="flex items-center space-x-2 p-2 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 transition col-span-2">
+                                <input type="checkbox" id="chk-route-gas" checked class="w-4 h-4 text-amber-600 rounded accent-amber-600">
+                                <span class="text-sm font-medium text-amber-700">Gasolinera</span>
+                            </label>
+                        </div>
                     </div>
                 </div>
             </div>
-
-            <!-- Terminal Logs -->
-            <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm h-48 flex flex-col">
-                <h2 class="text-sm font-bold text-slate-500 mb-2">📡 Monitor de Señales</h2>
-                <div id="terminal-logs"
-                    class="bg-slate-900 text-emerald-400 font-mono text-xs p-3 rounded-lg overflow-y-auto flex-1 custom-scrollbar whitespace-pre-wrap leading-relaxed">
+            
+            <!-- Footer -->
+            <div class="p-3 border-t border-slate-200 bg-slate-50 text-center">
+                <div class="text-xs text-slate-500 font-medium">
+                    Sistema Digital Twin v2.0
+                </div>
+                <div class="text-xs text-slate-400 mt-1">
+                    © 2026 HPE Ambulancia Digital
                 </div>
             </div>
-
         </div>
-
+        
+        <!-- Main Content Area -->
+        <div class="flex-1 flex flex-col overflow-hidden">
+            
+            <!-- Map & Fleet Container -->
+            <div class="flex-1 flex overflow-hidden p-4 pb-0">
+                
+                <!-- Fleet Overview Panel -->
+                <div class="w-80 xl:w-96 bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 shadow-soft mr-4 flex flex-col overflow-hidden">
+                    <div class="p-5 border-b border-slate-200">
+                        <div class="flex items-center justify-between">
+                            <h2 class="text-lg font-bold text-blue-600 flex items-center">
+                                <i class="fas fa-ambulance mr-2"></i> ESTADO DE LA FLOTA
+                            </h2>
+                            <span id="fleet-count" class="text-sm font-bold bg-blue-100 text-blue-700 px-2.5 py-1 rounded-full">0</span>
+                        </div>
+                        
+                        <!-- Fleet Statistics -->
+                        <div class="grid grid-cols-3 gap-2 mt-3">
+                            <div class="text-center p-2 bg-blue-50 rounded-lg">
+                                <div class="text-xs font-semibold text-blue-600">ACTIVAS</div>
+                                <div id="fleet-active" class="text-lg font-bold text-blue-700">0</div>
+                            </div>
+                            <div class="text-center p-2 bg-amber-50 rounded-lg">
+                                <div class="text-xs font-semibold text-amber-600">EN USO</div>
+                                <div id="fleet-in-use" class="text-lg font-bold text-amber-700">0</div>
+                            </div>
+                            <div class="text-center p-2 bg-slate-100 rounded-lg">
+                                <div class="text-xs font-semibold text-slate-600">TOTAL</div>
+                                <div id="fleet-total" class="text-lg font-bold text-slate-700">0</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Fleet List -->
+                    <div id="fleet-container" class="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                        <!-- Dynamic ambulance cards go here -->
+                        <div class="text-center py-10 text-slate-400">
+                            <i class="fas fa-ambulance text-3xl mb-3"></i>
+                            <p class="text-sm font-medium">No hay ambulancias desplegadas</p>
+                            <p class="text-xs mt-1">Haz clic en el mapa para añadir una</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Map Container -->
+                <div class="flex-1 bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 shadow-soft overflow-hidden flex flex-col">
+                    <!-- Map Header -->
+                    <div class="p-5 border-b border-slate-200">
+                        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                            <div class="flex items-center space-x-3">
+                                <div class="p-2 bg-blue-100 rounded-lg">
+                                    <i class="fas fa-map-marked-alt text-blue-600 text-xl"></i>
+                                </div>
+                                <div>
+                                    <h2 class="text-xl font-bold text-slate-800">Radar Táctico de Posicionamiento</h2>
+                                    <p class="text-sm text-slate-500">Monitorización en tiempo real de la flota</p>
+                                </div>
+                            </div>
+                            
+                            <!-- Map Controls -->
+                            <div class="flex flex-wrap gap-2">
+                                <!-- Search Box -->
+                                <div class="flex bg-white rounded-lg border border-slate-300 overflow-hidden shadow-inner">
+                                    <input type="text" id="city-search" placeholder="Buscar ciudad..."
+                                        class="px-3 py-2 outline-none bg-transparent w-40 lg:w-52 text-slate-700">
+                                    <button id="btn-search-city"
+                                        class="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 transition font-medium">
+                                        <i class="fas fa-search"></i>
+                                    </button>
+                                </div>
+                                
+                                <!-- Drawing Mode Selector -->
+                                <div class="flex bg-slate-100 rounded-lg p-1 text-sm font-semibold shadow-inner border border-slate-300">
+                                    <label class="cursor-pointer px-3 py-2 rounded radio-mode flex items-center space-x-1">
+                                        <input type="radio" name="drawMode" value="PAN" class="hidden">
+                                        <i class="fas fa-hand-paper"></i>
+                                        <span class="hidden lg:inline">Mover</span>
+                                    </label>
+                                    <label class="cursor-pointer px-3 py-2 rounded radio-mode flex items-center space-x-1 active">
+                                        <input type="radio" name="drawMode" value="EMERGENCY" class="hidden" checked>
+                                        <i class="fas fa-crosshairs"></i>
+                                        <span class="hidden lg:inline">Urgencia</span>
+                                    </label>
+                                    <label class="cursor-pointer px-3 py-2 rounded radio-mode flex items-center space-x-1">
+                                        <input type="radio" name="drawMode" value="AMBULANCE" class="hidden">
+                                        <i class="fas fa-ambulance"></i>
+                                        <span class="hidden lg:inline">Ambulancia</span>
+                                    </label>
+                                    <label class="cursor-pointer px-3 py-2 rounded radio-mode flex items-center space-x-1">
+                                        <input type="radio" name="drawMode" value="JAM" class="hidden">
+                                        <i class="fas fa-traffic-light"></i>
+                                        <span class="hidden lg:inline">Atasco</span>
+                                    </label>
+                                    <label class="cursor-pointer px-3 py-2 rounded radio-mode flex items-center space-x-1">
+                                        <input type="radio" name="drawMode" value="HOSPITAL" class="hidden">
+                                        <i class="fas fa-hospital"></i>
+                                        <span class="hidden lg:inline">Hospital</span>
+                                    </label>
+                                    <label class="cursor-pointer px-3 py-2 rounded radio-mode flex items-center space-x-1">
+                                        <input type="radio" name="drawMode" value="GAS_STATION" class="hidden">
+                                        <i class="fas fa-gas-pump"></i>
+                                        <span class="hidden lg:inline">Gasolinera</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Drawing Instructions -->
+                        <div class="mt-3 text-xs text-slate-500 font-medium flex items-center space-x-4">
+                            <div class="flex items-center space-x-1">
+                                <div class="w-2 h-2 rounded-full bg-blue-500"></div>
+                                <span>Ambulancia</span>
+                            </div>
+                            <div class="flex items-center space-x-1">
+                                <div class="w-2 h-2 rounded-full bg-red-500"></div>
+                                <span>Urgencia</span>
+                            </div>
+                            <div class="flex items-center space-x-1">
+                                <div class="w-2 h-2 rounded-full bg-emerald-500"></div>
+                                <span>Hospital</span>
+                            </div>
+                            <div class="flex items-center space-x-1">
+                                <div class="w-2 h-2 rounded-full bg-amber-500"></div>
+                                <span>Gasolinera</span>
+                            </div>
+                            <div class="flex items-center space-x-1">
+                                <div class="w-2 h-2 rounded-full bg-slate-500"></div>
+                                <span>Atasco</span>
+                            </div>
+                            <div class="ml-auto text-slate-400">
+                                <i class="fas fa-mouse-pointer mr-1"></i>
+                                <span>Clic: Añadir | Clic Derecho: Eliminar</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Map -->
+                    <div class="relative flex-1 min-h-[400px] bg-gradient-to-br from-slate-100 to-blue-50 border-t border-slate-200 overflow-hidden">
+                        <div id="tactical-map" class="absolute inset-0 z-0"></div>
+                        
+                        <!-- Map Overlay Controls -->
+                        <div class="absolute top-4 right-4 z-10 flex flex-col space-y-2">
+                            <button id="btn-zoom-in" class="p-2 bg-white rounded-lg shadow-md hover:shadow-lg transition">
+                                <i class="fas fa-plus text-slate-700"></i>
+                            </button>
+                            <button id="btn-zoom-out" class="p-2 bg-white rounded-lg shadow-md hover:shadow-lg transition">
+                                <i class="fas fa-minus text-slate-700"></i>
+                            </button>
+                            <button id="btn-center-map" class="p-2 bg-white rounded-lg shadow-md hover:shadow-lg transition">
+                                <i class="fas fa-crosshairs text-slate-700"></i>
+                            </button>
+                        </div>
+                        
+                        <!-- Map Legend -->
+                        <div class="absolute bottom-4 left-4 z-10 bg-white/90 backdrop-blur-sm rounded-xl p-3 shadow-lg border border-slate-200">
+                            <h3 class="text-xs font-bold text-slate-700 mb-2">LEYENDA</h3>
+                            <div class="space-y-1">
+                                <div class="flex items-center space-x-2">
+                                    <div class="w-3 h-3 rounded-full bg-emerald-500"></div>
+                                    <span class="text-xs">Ambulancia Activa</span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <div class="w-3 h-3 rounded-full bg-blue-500 pulse-ring"></div>
+                                    <span class="text-xs">Ambulancia en Ruta</span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <div class="w-3 h-3 rounded-full bg-red-500 animate-pulse"></div>
+                                    <span class="text-xs">Urgencia Activa</span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <div class="w-3 h-3 rounded-full bg-slate-400"></div>
+                                    <span class="text-xs">Atasco de Tráfico</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Bottom Panels: Terminal Logs & Emergency List -->
+            <div class="flex p-4 pt-2 space-x-4 overflow-hidden" style="height: 35%;">
+                
+                <!-- Terminal Logs -->
+                <div class="flex-1 bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 shadow-soft overflow-hidden flex flex-col">
+                    <div class="p-4 border-b border-slate-200 flex items-center justify-between">
+                        <h2 class="text-lg font-bold text-slate-700 flex items-center">
+                            <i class="fas fa-terminal mr-2"></i> MONITOR DE SEÑALES
+                        </h2>
+                        <div class="flex items-center space-x-2">
+                            <button id="btn-clear-logs" class="text-xs font-medium px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded transition">
+                                <i class="fas fa-trash-alt mr-1"></i> Limpiar
+                            </button>
+                            <span id="log-count" class="text-xs font-bold bg-blue-100 text-blue-700 px-2.5 py-1 rounded-full">0</span>
+                        </div>
+                    </div>
+                    
+                    <div id="terminal-logs" class="flex-1 bg-slate-900 text-emerald-300 font-mono text-xs p-4 overflow-y-auto custom-scrollbar whitespace-pre-wrap leading-relaxed">
+                        <div class="text-slate-500 text-center py-8">
+                            <i class="fas fa-satellite-dish text-2xl mb-2"></i>
+                            <p>Esperando conexión con el servidor...</p>
+                            <p class="text-xs mt-1">El sistema se conectará automáticamente</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Emergency List -->
+                <div class="w-96 bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 shadow-soft overflow-hidden flex flex-col">
+                    <div class="p-4 border-b border-slate-200 flex items-center justify-between">
+                        <h2 class="text-lg font-bold text-slate-700 flex items-center">
+                            <i class="fas fa-exclamation-triangle mr-2 text-red-500"></i> URGENCIAS ACTIVAS
+                        </h2>
+                        <span id="emergencies-count" class="text-sm font-bold bg-red-100 text-red-700 px-2.5 py-1 rounded-full">0</span>
+                    </div>
+                    
+                    <div id="emergencies-container" class="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                        <div class="text-center py-10 text-slate-400">
+                            <i class="fas fa-exclamation-circle text-3xl mb-3"></i>
+                            <p class="text-sm font-medium">No hay urgencias activas</p>
+                            <p class="text-xs mt-1">Crea una urgencia en el mapa</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
-    <!-- Modals -->
-    <div id="telemetry-modal"
-        class="fixed inset-0 bg-slate-900 bg-opacity-50 hidden items-center justify-center z-50 backdrop-blur-sm">
-        <div
-            class="bg-white rounded-xl shadow-2xl w-full max-w-md flex flex-col border border-slate-200 overflow-hidden transform transition-all">
-            <div class="bg-slate-50 px-6 py-4 flex justify-between items-center border-b border-slate-200">
-                <h3 class="text-lg font-bold text-blue-600" id="modal-title">Telemetría - AMB-000</h3>
-                <button id="btn-close-modal" class="text-slate-400 hover:text-slate-600 focus:outline-none">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12">
-                        </path>
-                    </svg>
+    <!-- Telemetry Modal -->
+    <div id="telemetry-modal" class="modal-overlay hidden">
+        <div class="modal-content w-full max-w-4xl">
+            <div class="bg-gradient-to-r from-blue-600 to-blue-700 px-6 py-4 flex justify-between items-center">
+                <div class="flex items-center space-x-3">
+                    <div class="p-2 bg-white/20 rounded-lg">
+                        <i class="fas fa-heartbeat text-white text-xl"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-xl font-bold text-white" id="modal-title">Telemetría - AMB-000</h3>
+                        <p class="text-blue-100 text-sm">Monitoreo en tiempo real de constantes vitales y mecánicas</p>
+                    </div>
+                </div>
+                <button id="btn-close-modal" class="text-white hover:text-blue-200 focus:outline-none text-2xl">
+                    <i class="fas fa-times"></i>
                 </button>
             </div>
-            <div class="p-6 bg-slate-900 text-emerald-400 font-mono text-xs overflow-y-auto max-h-96 custom-scrollbar">
-                <pre id="modal-json"></pre>
+            
+            <div class="p-0 flex flex-col md:flex-row">
+                <!-- Left Panel: Vital Signs -->
+                <div class="flex-1 p-6 border-r border-slate-200">
+                    <h4 class="text-lg font-bold text-slate-800 mb-4 flex items-center">
+                        <i class="fas fa-heartbeat text-red-500 mr-2"></i> CONSTANTES VITALES
+                    </h4>
+                    
+                    <div class="grid grid-cols-2 gap-4 mb-6">
+                        <div class="bg-red-50 p-4 rounded-xl border border-red-100">
+                            <div class="text-xs font-semibold text-red-600 uppercase">Frecuencia Cardíaca</div>
+                            <div class="text-2xl font-bold text-red-700" id="modal-heart-rate">--</div>
+                            <div class="text-xs text-red-500" id="modal-heart-rate-trend">-- BPM</div>
+                        </div>
+                        
+                        <div class="bg-blue-50 p-4 rounded-xl border border-blue-100">
+                            <div class="text-xs font-semibold text-blue-600 uppercase">Presión Arterial</div>
+                            <div class="text-2xl font-bold text-blue-700" id="modal-blood-pressure">--/--</div>
+                            <div class="text-xs text-blue-500" id="modal-map">MAP: -- mmHg</div>
+                        </div>
+                        
+                        <div class="bg-emerald-50 p-4 rounded-xl border border-emerald-100">
+                            <div class="text-xs font-semibold text-emerald-600 uppercase">Oxígeno en Sangre</div>
+                            <div class="text-2xl font-bold text-emerald-700" id="modal-oxygen">--%</div>
+                            <div class="text-xs text-emerald-500">SpO₂</div>
+                        </div>
+                        
+                        <div class="bg-amber-50 p-4 rounded-xl border border-amber-100">
+                            <div class="text-xs font-semibold text-amber-600 uppercase">Temperatura</div>
+                            <div class="text-2xl font-bold text-amber-700" id="modal-temperature">--°C</div>
+                            <div class="text-xs text-amber-500">Corporal</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Patient Status -->
+                    <div class="mb-6">
+                        <div class="flex items-center justify-between mb-2">
+                            <h5 class="font-semibold text-slate-700">Estado del Paciente</h5>
+                            <span id="modal-patient-status" class="px-3 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700">CRÍTICO</span>
+                        </div>
+                        <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                            <div class="grid grid-cols-3 gap-4 text-center">
+                                <div>
+                                    <div class="text-xs font-semibold text-slate-500">Ritmo ECG</div>
+                                    <div class="font-bold text-slate-800" id="modal-ecg">--</div>
+                                </div>
+                                <div>
+                                    <div class="text-xs font-semibold text-slate-500">GCS</div>
+                                    <div class="font-bold text-slate-800" id="modal-gcs">--</div>
+                                </div>
+                                <div>
+                                    <div class="text-xs font-semibold text-slate-500">Dolor (0-10)</div>
+                                    <div class="font-bold text-slate-800" id="modal-pain">--</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Treatment Controls -->
+                    <div>
+                        <h5 class="font-semibold text-slate-700 mb-3">Administrar Tratamiento</h5>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button class="modal-treatment-btn bg-blue-100 hover:bg-blue-200 text-blue-700 font-medium py-2 rounded-lg transition" data-treatment="oxygen">
+                                <i class="fas fa-lungs mr-1"></i> Oxígeno
+                            </button>
+                            <button class="modal-treatment-btn bg-red-100 hover:bg-red-200 text-red-700 font-medium py-2 rounded-lg transition" data-treatment="epinephrine">
+                                <i class="fas fa-syringe mr-1"></i> Epinefrina
+                            </button>
+                            <button class="modal-treatment-btn bg-emerald-100 hover:bg-emerald-200 text-emerald-700 font-medium py-2 rounded-lg transition" data-treatment="fluids">
+                                <i class="fas fa-tint mr-1"></i> Fluidos
+                            </button>
+                            <button class="modal-treatment-btn bg-purple-100 hover:bg-purple-200 text-purple-700 font-medium py-2 rounded-lg transition" data-treatment="analgesia">
+                                <i class="fas fa-pills mr-1"></i> Analgesia
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Right Panel: Mechanical Status -->
+                <div class="flex-1 p-6">
+                    <h4 class="text-lg font-bold text-slate-800 mb-4 flex items-center">
+                        <i class="fas fa-cogs text-blue-500 mr-2"></i> ESTADO MECÁNICO
+                    </h4>
+                    
+                    <!-- Fuel & Battery -->
+                    <div class="grid grid-cols-2 gap-4 mb-6">
+                        <div class="bg-amber-50 p-4 rounded-xl border border-amber-100">
+                            <div class="flex justify-between items-center mb-2">
+                                <div class="text-xs font-semibold text-amber-600 uppercase">Combustible</div>
+                                <span id="modal-fuel-percent" class="text-xs font-bold text-amber-700">--%</span>
+                            </div>
+                            <div class="w-full bg-amber-200 rounded-full h-2.5">
+                                <div id="modal-fuel-bar" class="bg-amber-500 h-2.5 rounded-full" style="width: 100%"></div>
+                            </div>
+                            <div class="text-xs text-amber-500 mt-1" id="modal-fuel-distance">Distancia restante: -- km</div>
+                        </div>
+                        
+                        <div class="bg-emerald-50 p-4 rounded-xl border border-emerald-100">
+                            <div class="flex justify-between items-center mb-2">
+                                <div class="text-xs font-semibold text-emerald-600 uppercase">Batería</div>
+                                <span id="modal-battery-percent" class="text-xs font-bold text-emerald-700">--%</span>
+                            </div>
+                            <div class="w-full bg-emerald-200 rounded-full h-2.5">
+                                <div id="modal-battery-bar" class="bg-emerald-500 h-2.5 rounded-full" style="width: 100%"></div>
+                            </div>
+                            <div class="text-xs text-emerald-500 mt-1" id="modal-battery-voltage">Voltaje: -- V</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Tire Pressure -->
+                    <div class="mb-6">
+                        <h5 class="font-semibold text-slate-700 mb-3">Presión de Neumáticos (PSI)</h5>
+                        <div class="grid grid-cols-4 gap-2">
+                            <div class="text-center p-3 bg-slate-50 rounded-xl border border-slate-200">
+                                <div class="text-xs text-slate-500">Delantera Izq</div>
+                                <div class="text-xl font-bold text-slate-800" id="modal-tire-fl">--</div>
+                            </div>
+                            <div class="text-center p-3 bg-slate-50 rounded-xl border border-slate-200">
+                                <div class="text-xs text-slate-500">Delantera Der</div>
+                                <div class="text-xl font-bold text-slate-800" id="modal-tire-fr">--</div>
+                            </div>
+                            <div class="text-center p-3 bg-slate-50 rounded-xl border border-slate-200">
+                                <div class="text-xs text-slate-500">Trasera Izq</div>
+                                <div class="text-xl font-bold text-slate-800" id="modal-tire-rl">--</div>
+                            </div>
+                            <div class="text-center p-3 bg-slate-50 rounded-xl border border-slate-200">
+                                <div class="text-xs text-slate-500">Trasera Der</div>
+                                <div class="text-xl font-bold text-slate-800" id="modal-tire-rr">--</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Temperatures -->
+                    <div class="mb-6">
+                        <h5 class="font-semibold text-slate-700 mb-3">Temperaturas (°C)</h5>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="bg-red-50 p-4 rounded-xl border border-red-100">
+                                <div class="text-xs font-semibold text-red-600 uppercase">Motor</div>
+                                <div class="text-2xl font-bold text-red-700" id="modal-engine-temp">--</div>
+                                <div class="text-xs text-red-500" id="modal-engine-temp-status">Normal</div>
+                            </div>
+                            <div class="bg-blue-50 p-4 rounded-xl border border-blue-100">
+                                <div class="text-xs font-semibold text-blue-600 uppercase">Transmisión</div>
+                                <div class="text-2xl font-bold text-blue-700" id="modal-trans-temp">--</div>
+                                <div class="text-xs text-blue-500" id="modal-trans-temp-status">Normal</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Maintenance Controls -->
+                    <div>
+                        <h5 class="font-semibold text-slate-700 mb-3">Acciones de Mantenimiento</h5>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button id="modal-refuel-btn" class="bg-amber-100 hover:bg-amber-200 text-amber-700 font-medium py-2 rounded-lg transition">
+                                <i class="fas fa-gas-pump mr-1"></i> Repostar
+                            </button>
+                            <button id="modal-maintenance-btn" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-700 font-medium py-2 rounded-lg transition">
+                                <i class="fas fa-tools mr-1"></i> Mantenimiento
+                            </button>
+                            <button class="modal-incident-btn bg-red-100 hover:bg-red-200 text-red-700 font-medium py-2 rounded-lg transition col-span-2" data-category="mechanical" data-incident="flat_tire">
+                                <i class="fas fa-exclamation-triangle mr-1"></i> Simular Pinchazo
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>
+            
+            <!-- Raw JSON Data (Collapsible) -->
+            <div class="border-t border-slate-200">
+                <div class="px-6 py-3 bg-slate-50 flex justify-between items-center cursor-pointer" id="toggle-json">
+                    <h5 class="font-semibold text-slate-700">
+                        <i class="fas fa-code mr-2"></i> Datos Técnicos (JSON)
+                    </h5>
+                    <i class="fas fa-chevron-down text-slate-500 transition-transform" id="json-arrow"></i>
+                </div>
+                <div id="json-container" class="hidden">
+                    <div class="p-6 bg-slate-900 text-emerald-300 font-mono text-xs overflow-y-auto max-h-64 custom-scrollbar">
+                        <pre id="modal-json">Cargando datos...</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- System Alert Modal -->
+    <div id="alert-modal" class="fixed inset-0 bg-slate-900 bg-opacity-70 hidden items-center justify-center z-[9999] backdrop-blur-sm">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md transform transition-all scale-95">
+            <div class="p-6">
+                <div class="flex items-center space-x-3 mb-4">
+                    <div id="alert-icon" class="p-3 rounded-full bg-red-100">
+                        <i class="fas fa-exclamation-triangle text-red-600 text-xl"></i>
+                    </div>
+                    <div>
+                        <h3 id="alert-title" class="text-xl font-bold text-slate-800">Alerta del Sistema</h3>
+                        <p id="alert-message" class="text-slate-600">Mensaje de alerta</p>
+                    </div>
+                </div>
+                <div class="flex justify-end space-x-3">
+                    <button id="alert-dismiss" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-lg transition">
+                        Cerrar
+                    </button>
+                    <button id="alert-action" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition hidden">
+                        Acción
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="fixed inset-0 bg-white/80 backdrop-blur-sm flex items-center justify-center z-[9999]">
+        <div class="text-center">
+            <div class="spinner w-16 h-16 border-4 border-blue-200 border-t-blue-600 rounded-full mx-auto mb-6"></div>
+            <h2 class="text-2xl font-bold text-slate-800 mb-2">Iniciando Centro de Operaciones</h2>
+            <p class="text-slate-600">Cargando sistemas de monitorización...</p>
+            <div class="mt-4 w-64 h-2 bg-slate-200 rounded-full overflow-hidden mx-auto">
+                <div id="loading-progress" class="h-full bg-blue-600 rounded-full" style="width: 0%"></div>
+            </div>
+            <p id="loading-status" class="text-sm text-slate-500 mt-2">Conectando con el servidor...</p>
         </div>
     </div>
 
     <script src="/app.js"></script>
+    
+    <script>
+        // Inicializar hora actual
+        function updateCurrentTime() {
+            const now = new Date();
+            const timeString = now.toLocaleTimeString('es-ES', { 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit' 
+            });
+            document.getElementById('current-time').textContent = timeString;
+        }
+        
+        // Actualizar cada segundo
+        setInterval(updateCurrentTime, 1000);
+        updateCurrentTime();
+        
+        // Mostrar loading overlay inicialmente
+        document.addEventListener('DOMContentLoaded', function() {
+            // Simular progreso de carga
+            let progress = 0;
+            const progressInterval = setInterval(() => {
+                progress += Math.random() * 15;
+                if (progress > 100) {
+                    progress = 100;
+                    clearInterval(progressInterval);
+                    
+                    // Ocultar loading después de un momento
+                    setTimeout(() => {
+                        document.getElementById('loading-overlay').classList.add('hidden');
+                    }, 500);
+                }
+                document.getElementById('loading-progress').style.width = `${progress}%`;
+            }, 200);
+            
+            // Actualizar estado de carga
+            const statusMessages = [
+                "Conectando con el servidor...",
+                "Cargando mapa táctico...",
+                "Inicializando sistemas de telemetría...",
+                "Conectando con la flota...",
+                "Sistema listo"
+            ];
+            
+            let statusIndex = 0;
+            const statusInterval = setInterval(() => {
+                if (statusIndex < statusMessages.length) {
+                    document.getElementById('loading-status').textContent = statusMessages[statusIndex];
+                    statusIndex++;
+                } else {
+                    clearInterval(statusInterval);
+                }
+            }, 800);
+        });
+        
+        // Manejar toggle de JSON en modal
+        document.addEventListener('click', function(e) {
+            if (e.target.id === 'toggle-json' || e.target.closest('#toggle-json')) {
+                const container = document.getElementById('json-container');
+                const arrow = document.getElementById('json-arrow');
+                
+                if (container.classList.contains('hidden')) {
+                    container.classList.remove('hidden');
+                    arrow.classList.add('rotate-180');
+                } else {
+                    container.classList.add('hidden');
+                    arrow.classList.remove('rotate-180');
+                }
+            }
+        });
+    </script>
 </body>
 
 </html>

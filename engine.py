@@ -2,13 +2,28 @@ import time
 import math
 import uuid
 import threading
+import logging
+from typing import Dict, List, Optional, Any, Tuple, Callable
 from main import launch_ambulance
-from telemetry.logistics import POIS, JAMS
+from telemetry.logistics import POIS, JAMS, MissionStatus
+
+logger = logging.getLogger(__name__)
 
 class SimulatorEngine:
-    def __init__(self, log_callback=None):
-        self.ambulances = {}
-        self.active_emergencies = {}
+    """
+    Motor central de simulación que gestiona flota de ambulancias, emergencias
+    y lógica de despacho inteligente.
+    """
+    
+    def __init__(self, log_callback: Optional[Callable[[str], None]] = None):
+        """
+        Inicializa el motor de simulación.
+        
+        Args:
+            log_callback: Función callback para logging
+        """
+        self.ambulances: Dict[str, Any] = {}
+        self.active_emergencies: Dict[str, Dict[str, Any]] = {}
         
         self.running = True
         self.is_simulating = False
@@ -18,210 +33,657 @@ class SimulatorEngine:
         self.p2p_on = True
         self.http_on = True
         
-        self.log_callback = log_callback
+        self.log_callback = log_callback or self._default_logger
         
+        # Estadísticas
+        self.emergencies_handled = 0
+        self.total_response_time = 0.0
+        self.average_response_time = 0.0
+        
+        # Iniciar hilo de despacho
         self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True)
         self._dispatch_thread.start()
         
-    def log_network(self, message):
+        logger.info("SimulatorEngine inicializado")
+        
+    def _default_logger(self, message: str) -> None:
+        """Logger por defecto."""
+        logger.info(message)
+
+    def log_network(self, message: str) -> None:
+        """Envía mensaje al logger."""
         if self.log_callback:
             self.log_callback(message)
-            
-    def spawn_ambulance(self, lat, lon):
-        am_id = f"AMB-{len(self.ambulances)+1:03d}"
-        self.ambulances[am_id] = launch_ambulance(am_id, lat, lon, "localhost", log_callback=self.log_network)
-        self.ambulances[am_id].speed_multiplier = self.speed_multiplier
-        self.ambulances[am_id].is_paused = not self.is_simulating
-        
-        # Idle starting state
-        self.ambulances[am_id].logistics.route_to_nearest("GAS_STATION")
-        self.log_network(f"[SISTEMA] Nueva unidad {am_id} desplegada en mapa.")
-        return am_id
 
-    def spawn_emergency(self, lat, lon):
+    def spawn_ambulance(self, lat: float, lon: float) -> str:
+        """
+        Despliega una nueva ambulancia en el mapa.
+        
+        Args:
+            lat: Latitud inicial
+            lon: Longitud inicial
+            
+        Returns:
+            ID de la ambulancia creada
+        """
+        am_id = f"AMB-{len(self.ambulances)+1:03d}"
+        
+        try:
+            self.ambulances[am_id] = launch_ambulance(
+                am_id, lat, lon, "localhost", log_callback=self.log_network
+            )
+            self.ambulances[am_id].speed_multiplier = self.speed_multiplier
+            self.ambulances[am_id].is_paused = not self.is_simulating
+            
+            # Estado inicial: ir a gasolinera si hay poca gasolina
+            if hasattr(self.ambulances[am_id].logistics, 'route_to_nearest'):
+                self.ambulances[am_id].logistics.route_to_nearest("GAS_STATION")
+            
+            self.log_network(f"[SISTEMA] 🚑 Nueva unidad {am_id} desplegada en ({lat:.4f}, {lon:.4f}).")
+            return am_id
+            
+        except Exception as e:
+            logger.error(f"Error desplegando ambulancia: {e}")
+            self.log_network(f"[ERROR] Fallo al desplegar ambulancia: {e}")
+            raise
+
+    def spawn_emergency(self, lat: float, lon: float, severity: str = "MEDIUM") -> str:
+        """
+        Crea una nueva emergencia en el mapa.
+        
+        Args:
+            lat: Latitud de la emergencia
+            lon: Longitud de la emergencia
+            severity: Gravedad (LOW, MEDIUM, HIGH, CRITICAL)
+            
+        Returns:
+            ID de la emergencia creada
+        """
         em_id = str(uuid.uuid4())[:8]
-        emergency = {"id": em_id, "lat": lat, "lon": lon, "status": "INITIATED"}
+        emergency = {
+            "id": em_id,
+            "lat": lat,
+            "lon": lon,
+            "status": "INITIATED",
+            "severity": severity,
+            "created_at": time.time(),
+            "assigned_ambulance": None,
+            "response_time": None,
+            "hospital_assigned": None
+        }
+        
         self.active_emergencies[em_id] = emergency
-        self.log_network(f"[URGENCIA {em_id}] Estado: INITIATED. Registrada en mapa, esperando asignación de recursos...")
+        self.log_network(f"[URGENCIA {em_id}] 🚨 Estado: INITIATED. "
+                        f"Gravedad: {severity}. Ubicación: ({lat:.4f}, {lon:.4f})")
+        
+        # Evaluar asignación de recursos
         self.evaluate_fleet_assignments()
         return em_id
 
-    def evaluate_fleet_assignments(self):
-        if not self.running or not self.is_simulating: return
+    def evaluate_fleet_assignments(self) -> None:
+        """
+        Evalúa y asigna ambulancias disponibles a emergencias pendientes.
+        Usa algoritmo de asignación óptima considerando distancia, combustible
+        y gravedad de la emergencia.
+        """
+        if not self.running or not self.is_simulating:
+            return
         
-        # 1. Predictive Calculus for Emergencies finding ambulances
-        for em_id, em in list(self.active_emergencies.items()):
-            if em["status"] != "INITIATED":
-                continue
-                
-            best_amb, min_eff_dist = None, 999999
+        # Filtrar emergencias que necesitan asignación
+        pending_emergencies = [
+            em for em in self.active_emergencies.values() 
+            if em["status"] == "INITIATED"
+        ]
+        
+        if not pending_emergencies:
+            return
+        
+        # Filtrar hospitales disponibles
+        hospitals = [p for p in POIS if p.get("type") == "HOSPITAL"]
+        
+        for emergency in pending_emergencies:
+            best_amb = None
+            best_score = float('-inf')
             
-            hospitals = [p for p in POIS if p["type"] == "HOSPITAL"]
-            if not hospitals: continue
+            for amb_id, ambulance in self.ambulances.items():
+                # Verificar disponibilidad
+                if not self._is_ambulance_available(ambulance):
+                    continue
+                
+                # Calcular puntuación para esta ambulancia
+                score = self._calculate_dispatch_score(ambulance, emergency, hospitals)
+                
+                if score > best_score:
+                    best_score = score
+                    best_amb = ambulance
             
-            for am_id, amb in list(self.ambulances.items()):
-                # Only dispatch if ACTIVE, or INACTIVE but NOT currently refueling
-                is_available = amb.logistics.mission_status == "ACTIVE" or (amb.logistics.mission_status == "INACTIVE" and not amb.mechanical.is_refueling)
-                if is_available:
-                    # Distance to emergency
-                    dist_to_em_deg = math.sqrt((amb.logistics.lat - em["lat"])**2 + (amb.logistics.lon - em["lon"])**2)
-                    dist_to_em_km = dist_to_em_deg * 111.0 
-                    
-                    # Distance from emergency to nearest hospital
-                    min_h_dist = min([math.sqrt((h["lat"] - em["lat"])**2 + (h["lon"] - em["lon"])**2) for h in hospitals])
-                    min_h_dist_km = min_h_dist * 111.0
-                    
-                    total_dist_km = dist_to_em_km + min_h_dist_km
-                    fuel_cost = (total_dist_km * 0.15) * 1.5 + 2.0 # 1.5 multiplier + buffer for endurance tuning
-                    
-                    has_enough_fuel = amb.mechanical.fuel_level >= fuel_cost
-                    if has_enough_fuel:
-                        if dist_to_em_deg < min_eff_dist:
-                            min_eff_dist = dist_to_em_deg
-                            best_amb = amb
-                            
-            if best_amb:
-                em["status"] = "PROCESSING"
-                em["assigned_ambulance"] = best_amb.id
-                was_refueling_route = best_amb.logistics.mission_status == "INACTIVE"
-                best_amb.logistics.mission_status = "IN_USE"
-                best_amb.logistics.set_destination(em["lat"], em["lon"], "EMERGENCY")
-                
-                divert_msg = " [DESVÍO DE REPOSTAJE]" if was_refueling_route else ""
-                self.log_network(f"[URGENCIA {em_id}] Estado: PROCESSING. Asignada a Unidad {best_amb.id}.{divert_msg}")
-                # Dispatch loop will handle arrival detection
-                
-    def _dispatch_loop(self):
+            # Asignar mejor ambulancia si se encontró
+            if best_amb and best_score > 0:
+                self._assign_ambulance_to_emergency(best_amb, emergency, hospitals)
+
+    def _is_ambulance_available(self, ambulance: Any) -> bool:
+        """
+        Verifica si una ambulancia está disponible para asignación.
+        
+        Args:
+            ambulance: Instancia de ambulancia
+            
+        Returns:
+            True si está disponible
+        """
+        # Verificar estado de misión
+        mission_status = getattr(ambulance.logistics, 'mission_status', None)
+        if mission_status not in [MissionStatus.ACTIVE.value, MissionStatus.INACTIVE.value]:
+            return False
+        
+        # Verificar si está repostando
+        if getattr(ambulance.mechanical, 'is_refueling', False):
+            return False
+        
+        # Verificar combustible suficiente (mínimo 30%)
+        if getattr(ambulance.mechanical, 'fuel_level', 0) < 30.0:
+            return False
+        
+        # Verificar que no tenga paciente (a menos que permitamos traslados múltiples)
+        if getattr(ambulance.vitals, 'has_patient', False):
+            return False
+        
+        return True
+
+    def _calculate_dispatch_score(self, ambulance: Any, emergency: Dict, 
+                                 hospitals: List[Dict]) -> float:
+        """
+        Calcula puntuación de despacho para una ambulancia.
+        
+        Args:
+            ambulance: Instancia de ambulancia
+            emergency: Diccionario de emergencia
+            hospitals: Lista de hospitales disponibles
+            
+        Returns:
+            Puntuación de despacho (mayor es mejor)
+        """
+        # Distancia a la emergencia (km)
+        amb_lat = getattr(ambulance.logistics, 'lat', 0)
+        amb_lon = getattr(ambulance.logistics, 'lon', 0)
+        dist_to_emergency = self._calculate_distance_km(
+            amb_lat, amb_lon, emergency["lat"], emergency["lon"]
+        )
+        
+        # Distancia de emergencia al hospital más cercano
+        if hospitals:
+            hospital_distances = [
+                self._calculate_distance_km(
+                    emergency["lat"], emergency["lon"], h["lat"], h["lon"]
+                ) for h in hospitals
+            ]
+            dist_to_hospital = min(hospital_distances)
+        else:
+            dist_to_hospital = 5.0  # Default si no hay hospitales
+        
+        # Distancia total estimada
+        total_distance = dist_to_emergency + dist_to_hospital
+        
+        # Puntuación base (inversamente proporcional a distancia)
+        distance_score = 100.0 / (total_distance + 0.1)
+        
+        # Factor de combustible (penalizar bajo combustible)
+        fuel_level = getattr(ambulance.mechanical, 'fuel_level', 100.0)
+        fuel_consumption = total_distance * 0.15  # Estimación de consumo
+        fuel_factor = 1.0 if fuel_level > fuel_consumption * 2 else 0.3
+        
+        # Factor de gravedad (priorizar emergencias críticas)
+        severity_factors = {
+            "CRITICAL": 2.0,
+            "HIGH": 1.5,
+            "MEDIUM": 1.0,
+            "LOW": 0.7
+        }
+        severity_factor = severity_factors.get(emergency.get("severity", "MEDIUM"), 1.0)
+        
+        # Factor de estado mecánico
+        mech_status = getattr(ambulance.mechanical, 'get_state', lambda: {})().get('status', 'OK')
+        status_factors = {
+            "OK": 1.0,
+            "CAUTION": 0.8,
+            "WARNING": 0.5,
+            "CRITICAL": 0.1
+        }
+        status_factor = status_factors.get(mech_status, 0.5)
+        
+        # Puntuación final
+        score = distance_score * fuel_factor * severity_factor * status_factor
+        
+        # Penalizar ambulancias ya asignadas a otras emergencias
+        if getattr(ambulance.logistics, 'mission_status', '') == MissionStatus.IN_USE.value:
+            score *= 0.5
+        
+        return score
+
+    def _assign_ambulance_to_emergency(self, ambulance: Any, emergency: Dict, 
+                                      hospitals: List[Dict]) -> None:
+        """
+        Asigna una ambulancia a una emergencia.
+        
+        Args:
+            ambulance: Ambulancia a asignar
+            emergency: Emergencia a atender
+            hospitals: Lista de hospitales disponibles
+        """
+        emergency_id = emergency["id"]
+        ambulance_id = ambulance.id
+        
+        # Actualizar estado de emergencia
+        emergency["status"] = "PROCESSING"
+        emergency["assigned_ambulance"] = ambulance_id
+        emergency["assigned_at"] = time.time()
+        
+        # Actualizar estado de ambulancia
+        if hasattr(ambulance.logistics, 'mission_status'):
+            ambulance.logistics.mission_status = MissionStatus.IN_USE.value
+        
+        # Establecer destino a emergencia
+        if hasattr(ambulance.logistics, 'set_destination'):
+            ambulance.logistics.set_destination(
+                emergency["lat"], emergency["lon"], "EMERGENCY"
+            )
+        
+        # Asignar hospital más cercano para después
+        if hospitals:
+            # Encontrar hospital más cercano a la emergencia
+            nearest_hospital = min(
+                hospitals, 
+                key=lambda h: self._calculate_distance_km(
+                    emergency["lat"], emergency["lon"], h["lat"], h["lon"]
+                )
+            )
+            emergency["hospital_assigned"] = {
+                "lat": nearest_hospital["lat"],
+                "lon": nearest_hospital["lon"]
+            }
+        
+        # Log
+        response_time = emergency["assigned_at"] - emergency["created_at"]
+        self.log_network(
+            f"[DISPATCH] 🚑 Unidad {ambulance_id} asignada a Urgencia {emergency_id}. "
+            f"Tiempo respuesta: {response_time:.1f}s. "
+            f"Gravedad: {emergency.get('severity', 'MEDIUM')}"
+        )
+
+    def _dispatch_loop(self) -> None:
+        """
+        Bucle principal de despacho que monitorea estado de emergencias
+        y coordina transporte de pacientes.
+        """
         while self.running:
             if not self.is_simulating:
                 time.sleep(0.5)
                 continue
-                
+            
             try:
-                for em_id, em in list(self.active_emergencies.items()):
-                    if em["status"] == "PROCESSING":
-                        # Find the assigned ambulance that reached THIS emergency
-                        amb_id = em.get("assigned_ambulance")
-                        if amb_id and amb_id in self.ambulances:
-                            amb = self.ambulances[amb_id]
-                            if amb.logistics.mission_status == "IN_USE" and amb.logistics.destination_type == "EMERGENCY":
-                                if amb.logistics.destination is None and abs(amb.logistics.lat - em["lat"]) < 0.002 and abs(amb.logistics.lon - em["lon"]) < 0.002:
-                                    amb.vitals.has_patient = True 
-                                    self.log_network(f"[DISPATCHER] 🏥 Unidad {amb.id} estabilizando a paciente en escena. Buscando Hospital cercano...")
-                                    
-                                    hospitals = [p for p in POIS if p["type"] == "HOSPITAL"]
-                                    if hospitals:
-                                        # Load balancing calculation using safe distance matching to avoid float dict key errors
-                                        best_h = min(hospitals, key=lambda h: math.sqrt((amb.logistics.lat - h["lat"])**2 + (amb.logistics.lon - h["lon"])**2))
-                                        
-                                        dist_info = math.sqrt((amb.logistics.lat - best_h["lat"])**2 + (amb.logistics.lon - best_h["lon"])**2) * 111.0
-                                        self.log_network(f"[DISPATCHER] 🏥 Unidad {amb.id} transportando al Hospital [Dist: {dist_info:.2f} km].")
-                                        
-                                        amb.logistics.set_destination(best_h["lat"], best_h["lon"], "HOSPITAL")
-                                        amb.logistics.action_message = "Transportando al Hospital"
-                                        em["status"] = "TRANSPORTING"
-                                    
-                    elif em["status"] == "TRANSPORTING":
-                        # Check if reached hospital
-                        amb_id = em.get("assigned_ambulance")
-                        if amb_id and amb_id in self.ambulances:
-                            amb = self.ambulances[amb_id]
-                            if amb.logistics.mission_status == "IN_USE" and amb.vitals.has_patient and amb.logistics.destination_type == "HOSPITAL":
-                                if amb.logistics.destination is None:
-                                    # We assume this transport corresponds to the emergency in transporting state
-                                    amb.logistics.mission_status = "ACTIVE"
-                                    amb.vitals.has_patient = False
-                                    amb.logistics.action_message = "Esperando asignación"
-                                    
-                                    em["status"] = "RESOLVED"
-                                    if em["id"] in self.active_emergencies:
-                                        del self.active_emergencies[em["id"]]
-                                        
-                                    self.log_network(f"[URGENCIA {em['id']}] Estado: RESOLVED. Paciente ingresado con éxito por Unidad {amb.id}.")
-                                    self.evaluate_fleet_assignments()
-
+                self._monitor_emergency_progress()
+                self._manage_idle_ambulances()
+                self._update_statistics()
+                
             except Exception as e:
-                self.log_network(f"[DISPATCH ERROR] Bucle de control falló: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"Error en bucle de despacho: {e}")
+                self.log_network(f"[DISPATCH ERROR] {e}")
+            
+            time.sleep(0.2)  # 5 Hz
 
-            time.sleep(0.1) # 10 Hz refresh to cleanly catch triggers instantly
+    def _monitor_emergency_progress(self) -> None:
+        """Monitorea progreso de emergencias activas."""
+        current_time = time.time()
+        
+        for emergency in list(self.active_emergencies.values()):
+            em_id = emergency["id"]
+            amb_id = emergency.get("assigned_ambulance")
+            
+            if not amb_id or amb_id not in self.ambulances:
+                continue
+                
+            ambulance = self.ambulances[amb_id]
+            
+            # Emergencia en procesamiento (yendo al lugar)
+            if emergency["status"] == "PROCESSING":
+                self._handle_processing_emergency(emergency, ambulance, current_time)
+            
+            # Emergencia en transporte (yendo al hospital)
+            elif emergency["status"] == "TRANSPORTING":
+                self._handle_transporting_emergency(emergency, ambulance, current_time)
+            
+            # Verificar timeout (15 minutos máximo)
+            if current_time - emergency.get("created_at", current_time) > 900:  # 15 minutos
+                self.log_network(f"[TIMEOUT] ⏱️ Urgencia {em_id} excedió tiempo máximo de respuesta.")
+                emergency["status"] = "TIMEOUT"
+                if amb_id in self.ambulances:
+                    self._release_ambulance(ambulance)
+
+    def _handle_processing_emergency(self, emergency: Dict, ambulance: Any, 
+                                    current_time: float) -> None:
+        """Maneja emergencia en estado PROCESSING."""
+        em_id = emergency["id"]
+        amb_id = ambulance.id
+        
+        # Verificar si llegó a la emergencia
+        if (hasattr(ambulance.logistics, 'destination') and 
+            ambulance.logistics.destination is None):
+            
+            # Ambulancia llegó a emergencia
+            emergency["status"] = "ON_SCENE"
+            emergency["on_scene_at"] = current_time
+            
+            # Configurar paciente en ambulancia
+            if hasattr(ambulance.vitals, 'set_patient_info'):
+                ambulance.vitals.set_patient_info(age=45, has_patient=True)
+                ambulance.vitals.patient_status = "CRITICAL"
+            
+            # Asignar hospital destino
+            hospital = emergency.get("hospital_assigned")
+            if hospital and hasattr(ambulance.logistics, 'set_destination'):
+                ambulance.logistics.set_destination(
+                    hospital["lat"], hospital["lon"], "HOSPITAL"
+                )
+                ambulance.logistics.action_message = "Transportando al Hospital"
+                
+                emergency["status"] = "TRANSPORTING"
+                
+                distance = self._calculate_distance_km(
+                    ambulance.logistics.lat, ambulance.logistics.lon,
+                    hospital["lat"], hospital["lon"]
+                )
+                
+                self.log_network(
+                    f"[TRANSPORT] 🏥 Unidad {amb_id} transportando paciente al hospital. "
+                    f"Distancia: {distance:.1f} km"
+                )
+            else:
+                self.log_network(
+                    f"[ERROR] 🏥 No hay hospital asignado para Urgencia {em_id}"
+                )
+
+    def _handle_transporting_emergency(self, emergency: Dict, ambulance: Any, 
+                                      current_time: float) -> None:
+        """Maneja emergencia en estado TRANSPORTING."""
+        em_id = emergency["id"]
+        amb_id = ambulance.id
+        
+        # Verificar si llegó al hospital
+        if (hasattr(ambulance.logistics, 'destination') and 
+            ambulance.logistics.destination is None):
+            
+            # Paciente entregado en hospital
+            emergency["status"] = "RESOLVED"
+            emergency["resolved_at"] = current_time
+            
+            # Liberar ambulancia
+            self._release_ambulance(ambulance)
+            
+            # Actualizar estadísticas
+            self.emergencies_handled += 1
+            response_time = emergency["resolved_at"] - emergency["created_at"]
+            self.total_response_time += response_time
+            self.average_response_time = self.total_response_time / self.emergencies_handled
+            
+            self.log_network(
+                f"[RESUELTO] ✅ Urgencia {em_id} resuelta por Unidad {amb_id}. "
+                f"Tiempo total: {response_time/60:.1f} min. "
+                f"Promedio: {self.average_response_time/60:.1f} min"
+            )
+            
+            # Eliminar emergencia
+            if em_id in self.active_emergencies:
+                del self.active_emergencies[em_id]
+            
+            # Re-evaluar asignaciones
+            self.evaluate_fleet_assignments()
+
+    def _release_ambulance(self, ambulance: Any) -> None:
+        """Libera ambulancia para nuevas asignaciones."""
+        if hasattr(ambulance.logistics, 'mission_status'):
+            ambulance.logistics.mission_status = MissionStatus.ACTIVE.value
+        
+        if hasattr(ambulance.vitals, 'set_patient_info'):
+            ambulance.vitals.set_patient_info(has_patient=False)
+        
+        if hasattr(ambulance.logistics, 'action_message'):
+            ambulance.logistics.action_message = "Disponible para nuevas asignaciones"
+
+    def _manage_idle_ambulances(self) -> None:
+        """Gestiona ambulancias sin asignación."""
+        if not self.is_simulating:
+            return
+        
+        hospitals = [p for p in POIS if p.get("type") == "HOSPITAL"]
+        if not hospitals:
+            return
+        
+        for ambulance in self.ambulances.values():
+            # Solo ambulancias activas sin destino
+            if (hasattr(ambulance.logistics, 'mission_status') and 
+                ambulance.logistics.mission_status == MissionStatus.ACTIVE.value and
+                hasattr(ambulance.logistics, 'destination') and
+                ambulance.logistics.destination is None):
+                
+                # Verificar si ya está en un hospital
+                at_hospital = False
+                for h in hospitals:
+                    if (hasattr(ambulance.logistics, 'lat') and 
+                        hasattr(ambulance.logistics, 'lon')):
+                        dist = self._calculate_distance_km(
+                            ambulance.logistics.lat, ambulance.logistics.lon,
+                            h["lat"], h["lon"]
+                        )
+                        if dist < 0.5:  # Dentro de 500m
+                            at_hospital = True
+                            break
+                
+                if not at_hospital:
+                    # Enrutar al hospital más cercano
+                    nearest_hospital = min(
+                        hospitals,
+                        key=lambda h: self._calculate_distance_km(
+                            ambulance.logistics.lat, ambulance.logistics.lon,
+                            h["lat"], h["lon"]
+                        )
+                    )
                     
-        # 2. Free ambulances without a destination should dock at a hospital
-        # Note: This runs outside the emergency loop.
-        if self.is_simulating:
-            for am_id, amb in list(self.ambulances.items()):
-               if amb.logistics.mission_status == "ACTIVE" and amb.logistics.destination is None:
-                   hospitals = [p for p in POIS if p["type"] == "HOSPITAL"]
-                   
-                   # Am I already at a hospital?
-                   docked = False
-                   for h in hospitals:
-                       if abs(amb.logistics.lat - h["lat"]) < 0.003 and abs(amb.logistics.lon - h["lon"]) < 0.003:
-                           docked = True
-                           amb.logistics.action_message = "Estacionada en Base"
-                           break
-                   
-                   if not docked and hospitals:
-                       # Load balancing calculation finding nearest idle spot
-                       hospital_loads = { (h["lat"], h["lon"]): 0 for h in hospitals }
-                       for fleet_amb in list(self.ambulances.values()):
-                           dest = fleet_amb.logistics.destination
-                           if dest and fleet_amb.logistics.destination_type == "BASE":
-                               if dest in hospital_loads: hospital_loads[dest] += 1
-                               
-                       best_h = min(hospitals, key=lambda h: (hospital_loads.get((h["lat"], h["lon"]), 0), math.sqrt((amb.logistics.lat - h["lat"])**2 + (amb.logistics.lon - h["lon"])**2)))
-                       amb.logistics.set_destination(best_h["lat"], best_h["lon"], "BASE")
-                       amb.logistics.action_message = "Regresando a Base"
+                    if hasattr(ambulance.logistics, 'set_destination'):
+                        ambulance.logistics.set_destination(
+                            nearest_hospital["lat"], nearest_hospital["lon"], "BASE"
+                        )
+                        ambulance.logistics.action_message = "Regresando a Base"
 
-    def update_speed_multiplier(self, val):
-        self.speed_multiplier = val
-        for amb in self.ambulances.values():
-            amb.speed_multiplier = val
-        self.log_network(f"[SISTEMA] Reloj temporal del motor ajustado a {val}x.")
+    def _update_statistics(self) -> None:
+        """Actualiza estadísticas del sistema."""
+        # Pueden añadirse más métricas aquí
+        pass
 
-    def toggle_playback(self):
+    def _calculate_distance_km(self, lat1: float, lon1: float, 
+                              lat2: float, lon2: float) -> float:
+        """
+        Calcula distancia en kilómetros entre dos puntos.
+        
+        Args:
+            lat1, lon1: Coordenadas punto 1
+            lat2, lon2: Coordenadas punto 2
+            
+        Returns:
+            Distancia en kilómetros
+        """
+        # Fórmula de Haversine
+        R = 6371.0  # Radio terrestre en km
+        
+        lat1_rad = math.radians(lat1)
+        lon1_rad = math.radians(lon1)
+        lat2_rad = math.radians(lat2)
+        lon2_rad = math.radians(lon2)
+        
+        dlat = lat2_rad - lat1_rad
+        dlon = lon2_rad - lon1_rad
+        
+        a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+        
+        return R * c
+
+    def update_speed_multiplier(self, val: int) -> None:
+        """
+        Actualiza multiplicador de velocidad de simulación.
+        
+        Args:
+            val: Nuevo multiplicador (1-10)
+        """
+        self.speed_multiplier = max(1, min(10, val))
+        for ambulance in self.ambulances.values():
+            if hasattr(ambulance, 'speed_multiplier'):
+                ambulance.speed_multiplier = self.speed_multiplier
+        
+        self.log_network(f"[SISTEMA] ⚡ Reloj temporal ajustado a {self.speed_multiplier}x.")
+
+    def toggle_playback(self) -> None:
+        """Alterna estado de reproducción de la simulación."""
         self.is_simulating = not self.is_simulating
+        
+        for ambulance in self.ambulances.values():
+            if hasattr(ambulance, 'is_paused'):
+                ambulance.is_paused = not self.is_simulating
+        
         if self.is_simulating:
-            self.log_network("=== ▶️ MUNDO REACTIVADO ===")
-            for amb in self.ambulances.values():
-                amb.is_paused = False
+            self.log_network("=== ▶️ SIMULACIÓN INICIADA ===")
             self.evaluate_fleet_assignments()
         else:
-            self.log_network("=== ⏸️ MUNDO PAUSADO ===")
-            for amb in self.ambulances.values():
-                amb.is_paused = True
+            self.log_network("=== ⏸️ SIMULACIÓN PAUSADA ===")
 
-    def clear_all_scenario(self):
-        self.log_network("=== 🗑️ BORRADO DE SEGURIDAD. LIMPIANDO ESCENARIO... ===")
+    def clear_all_scenario(self) -> None:
+        """Limpia completamente el escenario de simulación."""
+        self.log_network("=== 🗑️ LIMPIANDO ESCENARIO... ===")
+        
         was_simulating = self.is_simulating
+        if was_simulating:
+            self.toggle_playback()
         
-        for am_id, amb in list(self.ambulances.items()):
-             amb.stop()
-             if amb.p2p_mesh: amb.p2p_mesh.stop()
+        # Detener todas las ambulancias
+        for ambulance in list(self.ambulances.values()):
+            if hasattr(ambulance, 'stop'):
+                ambulance.stop()
+            if hasattr(ambulance, 'p2p_mesh') and ambulance.p2p_mesh:
+                ambulance.p2p_mesh.stop()
         
+        # Limpiar estructuras de datos
         self.ambulances.clear()
+        
+        # Limpiar POIS y JAMS (importados de logistics)
+        global POIS, JAMS
         POIS.clear()
         JAMS.clear()
+        
         self.active_emergencies.clear()
         
-        self.log_network("[SISTEMA] MEMORIA PURGADA. Lienzo táctico preparado para nuevo vector.")
+        # Resetear estadísticas
+        self.emergencies_handled = 0
+        self.total_response_time = 0.0
+        self.average_response_time = 0.0
+        
+        self.log_network("[SISTEMA] ✅ Escenario limpiado. Listo para nueva simulación.")
+        
         if was_simulating:
             self.toggle_playback()
 
-    def toggle_networks(self, mqtt, p2p, http):
-        self.mqtt_on, self.p2p_on, self.http_on = mqtt, p2p, http
-        for am_id, amb in list(self.ambulances.items()):
-            if self.mqtt_on:
-                if amb.mqtt_client and not amb.mqtt_client.is_connected(): amb.mqtt_client.connect()
-            else:
-                if amb.mqtt_client and amb.mqtt_client.is_connected(): amb.mqtt_client.disconnect()
-            amb.p2p_enabled = self.p2p_on
-            amb.http_enabled = self.http_on
-        self.log_network(f"--- RED CONFIGURADA | MQTT:{'OK' if self.mqtt_on else 'OFF'} | P2P:{'OK' if self.p2p_on else 'OFF'} | HTTP:{'OK' if self.http_on else 'OFF'} ---")
+    def toggle_networks(self, mqtt: bool, p2p: bool, http: bool) -> None:
+        """
+        Habilita/deshabilita canales de comunicación.
+        
+        Args:
+            mqtt: Estado MQTT
+            p2p: Estado P2P
+            http: Estado HTTP
+        """
+        self.mqtt_on = mqtt
+        self.p2p_on = p2p
+        self.http_on = http
+        
+        for ambulance in self.ambulances.values():
+            if hasattr(ambulance, 'mqtt_client') and ambulance.mqtt_client:
+                if self.mqtt_on and not ambulance.mqtt_client.is_connected():
+                    ambulance.mqtt_client.connect()
+                elif not self.mqtt_on and ambulance.mqtt_client.is_connected():
+                    ambulance.mqtt_client.disconnect()
+            
+            if hasattr(ambulance, 'p2p_enabled'):
+                ambulance.p2p_enabled = self.p2p_on
+            
+            if hasattr(ambulance, 'http_enabled'):
+                ambulance.http_enabled = self.http_on
+        
+        status_msg = (
+            f"--- CONFIGURACIÓN RED ---\n"
+            f"MQTT: {'🟢 ACTIVADO' if self.mqtt_on else '🔴 DESACTIVADO'}\n"
+            f"P2P:  {'🟢 ACTIVADO' if self.p2p_on else '🔴 DESACTIVADO'}\n"
+            f"HTTP: {'🟢 ACTIVADO' if self.http_on else '🔴 DESACTIVADO'}"
+        )
+        self.log_network(status_msg)
 
-    def stop(self):
+    def stop(self) -> None:
+        """Detiene completamente el motor de simulación."""
         self.running = False
-        for amb in list(self.ambulances.values()):
-            amb.stop()
-            amb.p2p_mesh.stop()
+        self.is_simulating = False
+        
+        for ambulance in list(self.ambulances.values()):
+            if hasattr(ambulance, 'stop'):
+                ambulance.stop()
+            if hasattr(ambulance, 'p2p_mesh') and ambulance.p2p_mesh:
+                ambulance.p2p_mesh.stop()
+        
+        logger.info("SimulatorEngine detenido")
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """
+        Retorna estadísticas actuales del sistema.
+        
+        Returns:
+            Diccionario con estadísticas
+        """
+        return {
+            "total_ambulances": len(self.ambulances),
+            "active_emergencies": len(self.active_emergencies),
+            "emergencies_handled": self.emergencies_handled,
+            "average_response_time_min": round(self.average_response_time / 60, 1) if self.emergencies_handled > 0 else 0,
+            "is_simulating": self.is_simulating,
+            "speed_multiplier": self.speed_multiplier,
+            "network_status": {
+                "mqtt": self.mqtt_on,
+                "p2p": self.p2p_on,
+                "http": self.http_on
+            }
+        }
+
+    def get_ambulance_details(self, ambulance_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Obtiene detalles de una ambulancia específica.
+        
+        Args:
+            ambulance_id: ID de la ambulancia
+            
+        Returns:
+            Diccionario con detalles o None si no existe
+        """
+        if ambulance_id not in self.ambulances:
+            return None
+        
+        ambulance = self.ambulances[ambulance_id]
+        
+        details = {
+            "id": ambulance_id,
+            "running": getattr(ambulance, 'running', False),
+            "paused": getattr(ambulance, 'is_paused', False),
+            "speed_multiplier": getattr(ambulance, 'speed_multiplier', 1.0),
+            "communication_errors": getattr(ambulance, 'communication_errors', 0) if hasattr(ambulance, 'communication_errors') else 0,
+            "operational_hours": getattr(ambulance, 'operational_hours', 0.0) if hasattr(ambulance, 'operational_hours') else 0.0
+        }
+        
+        # Añadir estados de motores si están disponibles
+        if hasattr(ambulance, 'get_detailed_status'):
+            details.update(ambulance.get_detailed_status())
+        
+        return details

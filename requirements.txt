@@ -1,6 +1,19 @@
-paho-mqtt==1.6.1
-requests
-fastapi
-uvicorn
-osmnx
-networkx
+# Dependencias principales del proyecto (versiones compatibles con Windows)
+paho-mqtt>=1.6.1
+requests>=2.31.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-socketio>=5.10.0
+python-engineio>=4.7.0
+osmnx>=1.7.0
+networkx>=3.2.1
+geopy>=2.4.0
+pydantic>=2.0.0
+
+# Dependencias opcionales para visualización
+matplotlib>=3.8.0
+folium>=0.15.0
+plotly>=5.18.0
+
+# Nota: Ejecutar con `pip install -r requirements.txt`
+# Se pueden omitir las dependencias de desarrollo si hay problemas
