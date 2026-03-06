@@ -193,6 +193,19 @@ class AmbulanceCommandRequest(BaseModel):
     lat: Optional[float] = Field(None, description="Latitud del destino")
     lon: Optional[float] = Field(None, description="Longitud del destino")
 
+# --- Models for Backup API ---
+class BackupRequest(BaseModel):
+    ambulance_id: str
+    timestamp: Optional[float] = None
+    critical_data: Dict[str, Any]
+
+class BackupFilter(BaseModel):
+    ambulance_id: Optional[str] = None
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    data_type: Optional[str] = None  # position, patient, fuel, mechanical
+    limit: Optional[int] = 100
+
 # 5. REST Endpoints
 @app.get("/api")
 async def api_root():
@@ -547,6 +560,48 @@ async def api_get_statistics():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/state")
+async def api_get_state():
+    """Obtiene estado actual del sistema (similar a central/server.py para compatibilidad)."""
+    try:
+        # Compilar estado similar al servidor central
+        state = {
+            "timestamp": datetime.now().isoformat(),
+            "engine_running": engine.running,
+            "is_simulating": engine.is_simulating,
+            "speed_multiplier": engine.speed_multiplier,
+            "ambulances_count": len(engine.ambulances),
+            "emergencies_active": len(engine.active_emergencies),
+            "network_status": {
+                "mqtt": engine.mqtt_on,
+                "p2p": engine.p2p_on,
+                "http": engine.http_on
+            },
+            "ambulances": {},
+            "emergencies": engine.active_emergencies,
+            "pois": POIS,
+            "jams": JAMS
+        }
+        
+        # Añadir información detallada de ambulancias
+        for am_id, amb in engine.ambulances.items():
+            if hasattr(amb, 'current_state') and amb.current_state:
+                state["ambulances"][am_id] = amb.current_state
+            else:
+                # Información básica si no hay estado actual
+                state["ambulances"][am_id] = {
+                    "id": am_id,
+                    "running": getattr(amb, 'running', False),
+                    "position": {
+                        "lat": amb.logistics.lat if hasattr(amb.logistics, 'lat') else 0,
+                        "lon": amb.logistics.lon if hasattr(amb.logistics, 'lon') else 0
+                    } if hasattr(amb, 'logistics') else {}
+                }
+        
+        return state
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/incident/inject")
 async def api_inject_incident(req: IncidentRequest):
     """Inyecta un incidente en una ambulancia."""
@@ -857,6 +912,107 @@ async def connect(sid, environ):
 async def disconnect(sid):
     """Maneja desconexión de cliente WebSocket."""
     logger.info(f"Client disconnected: {sid}")
+
+@app.get("/backup_dashboard", include_in_schema=False)
+async def serve_backup_dashboard():
+    """Sirve el dashboard de backups."""
+    from fastapi.responses import FileResponse
+    backup_path = os.path.join("static", "backup_dashboard.html")
+    if os.path.exists(backup_path):
+        return FileResponse(backup_path)
+    else:
+        return {"message": "Backup dashboard no encontrado, ejecuta el servidor y accede a /static/backup_dashboard.html"}
+
+# --- Backup API Endpoints ---
+backup_store = []  # Simulación de almacenamiento de backups
+
+@app.post("/api/backup_state", status_code=201)
+async def api_backup_state(req: BackupRequest):
+    """Guarda un estado de backup crítico."""
+    try:
+        if not req.timestamp:
+            req.timestamp = time.time()
+        
+        backup_entry = {
+            "id": f"backup-{len(backup_store)}",
+            "ambulance_id": req.ambulance_id,
+            "timestamp": req.timestamp,
+            "critical_data": req.critical_data
+        }
+        
+        backup_store.append(backup_entry)
+        logger.info(f"Backup recibido: {req.ambulance_id} at {req.timestamp}")
+        
+        return {
+            "status": "stored",
+            "backup_id": backup_entry["id"],
+            "ambulance_id": req.ambulance_id,
+            "timestamp": req.timestamp,
+            "message": "Backup almacenado exitosamente"
+        }
+    except Exception as e:
+        logger.error(f"Error storing backup: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/backups/list")
+async def api_list_backups(filter: BackupFilter = None):
+    """Obtiene lista de backups con filtros opcionales."""
+    try:
+        if filter is None:
+            filter = BackupFilter()
+        
+        filtered = backup_store
+        
+        # Aplicar filtros
+        if filter.ambulance_id:
+            filtered = [b for b in filtered if b["ambulance_id"] == filter.ambulance_id]
+        
+        if filter.start_time:
+            filtered = [b for b in filtered if b["timestamp"] >= filter.start_time]
+        
+        if filter.end_time:
+            filtered = [b for b in filtered if b["timestamp"] <= filter.end_time]
+        
+        if filter.data_type:
+            filtered = [b for b in filtered if (
+                (filter.data_type == "position" and "position" in b["critical_data"]) or
+                (filter.data_type == "patient" and "patient_status" in b["critical_data"]) or
+                (filter.data_type == "fuel" and "fuel_level" in b["critical_data"]) or
+                (filter.data_type == "mechanical" and "mechanical_status" in b["critical_data"])
+            )]
+        
+        # Ordenar por timestamp descendente
+        filtered.sort(key=lambda x: x["timestamp"], reverse=True)
+        
+        # Aplicar límite
+        limited = filtered[:filter.limit]
+        
+        return {
+            "count": len(filtered),
+            "backups": limited,
+            "filter": filter.dict() if filter else {}
+        }
+    except Exception as e:
+        logger.error(f"Error listing backups: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/backups/count")
+async def api_count_backups():
+    """Obtiene conteo de backups."""
+    return {
+        "total": len(backup_store),
+        "last_24h": len([b for b in backup_store if b["timestamp"] > time.time() - 86400]),
+        "ambulance_count": len(set(b["ambulance_id"] for b in backup_store if "ambulance_id" in b))
+    }
+
+@app.delete("/api/backups/clear")
+async def api_clear_backups():
+    """Limpia todos los backups almacenados."""
+    backup_store.clear()
+    return {
+        "status": "cleared",
+        "message": "Todos los backups han sido eliminados"
+    }
 
 # 7. Serve the Dashboard Frontend
 # Asegurar que el directorio static existe

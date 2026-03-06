@@ -558,20 +558,25 @@ function updateAllStats(state) {
             httpCheckbox.checked = networkStatus.http;
         }
         
-        // Update network indicator colors
-        const mqttIndicator = document.querySelector('label[for="chk-mqtt"] .w-3.h-3');
-        const p2pIndicator = document.querySelector('label[for="chk-p2p"] .w-3.h-3');
-        const httpIndicator = document.querySelector('label[for="chk-http"] .w-3.h-3');
+        // Update network indicator colors - corrected selectors with better error handling
+        const mqttIndicator = document.querySelector('#chk-mqtt')?.closest('label')?.querySelector('.w-3.h-3');
+        const p2pIndicator = document.querySelector('#chk-p2p')?.closest('label')?.querySelector('.w-3.h-3');
+        const httpIndicator = document.querySelector('#chk-http')?.closest('label')?.querySelector('.w-3.h-3');
+        
+        if (DEBUG) console.log('Network indicators found:', { mqtt: !!mqttIndicator, p2p: !!p2pIndicator, http: !!httpIndicator });
         
         if (mqttIndicator) {
             mqttIndicator.className = `w-3 h-3 rounded-full ${networkStatus.mqtt ? 'bg-emerald-500' : 'bg-red-500'}`;
-        }
+        } else if (DEBUG) console.warn('MQTT indicator not found');
         if (p2pIndicator) {
             p2pIndicator.className = `w-3 h-3 rounded-full ${networkStatus.p2p ? 'bg-blue-500' : 'bg-red-500'}`;
-        }
+        } else if (DEBUG) console.warn('P2P indicator not found');
         if (httpIndicator) {
             httpIndicator.className = `w-3 h-3 rounded-full ${networkStatus.http ? 'bg-purple-500' : 'bg-red-500'}`;
-        }
+        } else if (DEBUG) console.warn('HTTP indicator not found');
+        
+        // Debug log
+        if (DEBUG) console.log('Network status updated:', networkStatus);
     }
     
     if (statResponseTimeEl) statResponseTimeEl.textContent = `${stats.average_response_time_min || '0.0'} min`;
@@ -668,7 +673,12 @@ function updateStatistics(state) {
 }
 
 function updateFleetUI() {
-    if (!fleetContainer) return;
+    if (!fleetContainer) {
+        if (DEBUG) console.error('fleetContainer not found!');
+        return;
+    }
+    
+    if (DEBUG) console.log('updateFleetUI called with ambulances:', Object.keys(simState.ambulances));
     
     // Collect existing keys to remove dead ones, and add/update others
     const currentDomIds = Array.from(fleetContainer.children)
@@ -676,31 +686,31 @@ function updateFleetUI() {
         .filter(id => id); // Filter out undefined
     
     const stateAmIds = Object.keys(simState.ambulances);
+    
+    if (DEBUG) console.log('Current DOM IDs:', currentDomIds, 'State ambulance IDs:', stateAmIds);
 
-    // Remove placeholder if there are ambulances (placeholder has no data-amId)
-    if (stateAmIds.length > 0) {
-        // Find and remove any placeholder elements (no data-amId)
-        Array.from(fleetContainer.children).forEach(child => {
-            if (!child.dataset.amId) {
-                child.remove();
-            }
-        });
-    }
-
-    // Remove deleted ambulance cards
+    // Remove deleted
     currentDomIds.filter(id => !stateAmIds.includes(id)).forEach(id => {
         const el = document.getElementById(`card-${id}`);
-        if (el) el.remove();
+        if (el) {
+            if (DEBUG) console.log('Removing ambulance card:', id);
+            el.remove();
+        }
     });
 
-    // Add or Update ambulance cards
+    // Add or Update
     stateAmIds.forEach(amId => {
         const amb = simState.ambulances[amId];
-        if (!amb) return;
+        if (!amb) {
+            if (DEBUG) console.warn('Ambulance data missing for:', amId);
+            return;
+        }
         
         const v = amb.vitals || {};
         const m = amb.mechanical || {};
         const l = amb.logistics || {};
+        
+        if (DEBUG) console.log('Processing ambulance:', amId, 'logistics:', l);
 
         const ms = l.mission_status || "ACTIVE";
         const hasPatient = v.has_patient || false;
@@ -721,6 +731,8 @@ function updateFleetUI() {
             colorTitle = 'text-red-500';
             statusBadge = '🔧 MANTENIMIENTO';
         }
+        
+        if (DEBUG) console.log(`Ambulance ${amId}: mission_status=${ms}, colorTitle=${colorTitle}`);
 
         let card = document.getElementById(`card-${amId}`);
         if (!card) {
@@ -804,19 +816,15 @@ function updateFleetUI() {
         }
     });
     
-    // Show placeholder if no ambulances and no placeholder already exists
-    if (stateAmIds.length === 0) {
-        // Check if placeholder already exists (any child without data-amId)
-        const hasPlaceholder = Array.from(fleetContainer.children).some(child => !child.dataset.amId);
-        if (!hasPlaceholder) {
-            fleetContainer.innerHTML = `
-                <div class="text-center py-10 text-slate-400">
-                    <i class="fas fa-ambulance text-3xl mb-3"></i>
-                    <p class="text-sm font-medium">No hay ambulancias desplegadas</p>
-                    <p class="text-xs mt-1">Haz clic en el mapa para añadir una</p>
-                </div>
-            `;
-        }
+    // Show placeholder if no ambulances
+    if (stateAmIds.length === 0 && fleetContainer.children.length === 0) {
+        fleetContainer.innerHTML = `
+            <div class="text-center py-10 text-slate-400">
+                <i class="fas fa-ambulance text-3xl mb-3"></i>
+                <p class="text-sm font-medium">No hay ambulancias desplegadas</p>
+                <p class="text-xs mt-1">Haz clic en el mapa para añadir una</p>
+            </div>
+        `;
     }
 }
 
@@ -945,12 +953,20 @@ function focusEmergency(emergencyId) {
 // Controls & API REST Calls
 // -------------------------------------------------------------
 function postJson(url, data) {
+    if (DEBUG) console.log(`POST ${url}:`, data);
     return fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data)
     })
-    .then(response => response.json())
+    .then(response => {
+        if (DEBUG) console.log(`Response status from ${url}:`, response.status);
+        return response.json();
+    })
+    .then(json => {
+        if (DEBUG) console.log(`Response data from ${url}:`, json);
+        return json;
+    })
     .catch(e => {
         console.error(`Error on ${url}:`, e);
         addTerminalLog(`[ERROR] Fallo en petición a ${url}: ${e.message}`);
@@ -1354,6 +1370,19 @@ document.addEventListener('keydown', (e) => {
 // Quick Actions Event Listeners
 // -------------------------------------------------------------
 function setupQuickActions() {
+    if (DEBUG) console.log('Setting up quick actions...');
+    
+    // Debug: Log all quick action buttons
+    const quickActionButtons = [
+        'btn-quick-emergency', 'btn-quick-ambulance', 'btn-quick-hospital',
+        'btn-quick-gas', 'btn-quick-incident', 'btn-quick-traffic',
+        'btn-quick-communication', 'btn-quick-weather', 'btn-quick-backup-dashboard'
+    ];
+    quickActionButtons.forEach(id => {
+        const btn = document.getElementById(id);
+        console.log(`Quick action button ${id}: ${btn ? 'FOUND' : 'NOT FOUND'}`);
+    });
+    
     // Get center of map for quick actions
     function getMapCenter() {
         const center = map.getCenter();
@@ -1363,6 +1392,7 @@ function setupQuickActions() {
     // Quick Emergency
     const btnQuickEmergency = document.getElementById('btn-quick-emergency');
     if (btnQuickEmergency) {
+        if (DEBUG) console.log('Found btn-quick-emergency');
         btnQuickEmergency.addEventListener('click', () => {
             const center = getMapCenter();
             postJson('/api/spawn', {
@@ -1373,11 +1403,14 @@ function setupQuickActions() {
             });
             addTerminalLog(`[ACCIÓN RÁPIDA] Emergencia creada en centro del mapa`);
         });
+    } else {
+        if (DEBUG) console.error('btn-quick-emergency not found!');
     }
     
     // Quick Ambulance
     const btnQuickAmbulance = document.getElementById('btn-quick-ambulance');
     if (btnQuickAmbulance) {
+        if (DEBUG) console.log('Found btn-quick-ambulance');
         btnQuickAmbulance.addEventListener('click', () => {
             const center = getMapCenter();
             postJson('/api/spawn', {
@@ -1387,6 +1420,8 @@ function setupQuickActions() {
             });
             addTerminalLog(`[ACCIÓN RÁPIDA] Ambulancia creada en centro del mapa`);
         });
+    } else {
+        if (DEBUG) console.error('btn-quick-ambulance not found!');
     }
     
     // Quick Hospital
@@ -1522,8 +1557,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize charts
     initCharts();
     
-    // Setup quick actions - REMOVED (quick actions eliminated from UI)
-    // setupQuickActions();
+    // Setup quick actions
+    setupQuickActions();
     
     // Add initial log
     addTerminalLog('[SISTEMA] Centro de Control Digital Twin inicializado');

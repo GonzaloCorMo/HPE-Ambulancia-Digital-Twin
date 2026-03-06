@@ -50,7 +50,7 @@ def launch_ambulance(am_id: str,
     
     # Inyectar dependencias de comunicación
     twin.mqtt_client = MQTTHandler(broker=broker_url, log_callback=log_callback)
-    twin.https_client = HTTPSHandler(base_url="http://localhost:8000", log_callback=log_callback)
+    twin.https_client = HTTPSHandler(base_url="http://localhost:5000", log_callback=log_callback)
     twin.p2p_mesh = P2PMeshHandler(port=5005, log_callback=log_callback)
     
     # Configurar ID de ambulancia en P2P mesh
@@ -249,7 +249,21 @@ def interactive_control(ambulances: Dict[str, AmbulanceTwin]) -> None:
                 print("\n🔄 SINCRONIZANDO CON BACKEND HTTPS...")
                 for am_id, amb in ambulances.items():
                     if hasattr(amb, 'https_client') and hasattr(amb, 'current_state'):
-                        response = amb.https_client.sync_backup(amb.current_state, async_mode=False)
+                        # Construir payload con estructura correcta para /api/backup_state
+                        payload = {
+                            "ambulance_id": am_id,
+                            "timestamp": time.time(),
+                            "critical_data": {
+                                "position": {
+                                    "lat": amb.logistics.lat,
+                                    "lon": amb.logistics.lon
+                                },
+                                "patient_status": amb.vitals.patient_status.value if amb.vitals.has_patient else "NONE",
+                                "fuel_level": amb.mechanical.fuel_level,
+                                "mission_status": amb.logistics.mission_status
+                            }
+                        }
+                        response = amb.https_client.sync_backup(payload, async_mode=False)
                         if response and response.is_success():
                             print(f"  {am_id}: ✅ Sincronización exitosa ({response.elapsed_time:.2f}s)")
                         else:

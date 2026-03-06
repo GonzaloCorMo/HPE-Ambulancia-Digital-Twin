@@ -14,10 +14,23 @@
 - **Motor de Constantes Vitales**: Simulación realista de pacientes con 12+ métricas médicas, tratamientos administrables
 - **Motor Logístico Inteligente**: Rutas optimizadas, detección de atascos, asignación dinámica de emergencias
 
+### ⛽ **Sistema de Repostaje Inteligente**
+- **Repostaje automático al 100%**: Las ambulancias se repostan exactamente al 100% en gasolineras
+- **Lógica de gestión de combustible**: Detección automática de niveles bajos y enrutamiento a gasolineras
+- **Acciones rápidas**: Botones de acción directa para simulación avanzada
+
+### 🎮 **Acciones Rápidas Mejoradas**
+- **Inyección de incidentes**: Simulación de fallos mecánicos, médicos y logísticos
+- **Administración de tratamientos**: Oxígeno, epinefrina, fluidos, analgesia
+- **Gestión de pacientes**: Configuración de edad y presencia de paciente
+- **Mantenimiento rápido**: Reparación completa con un clic
+- **Control de simulación**: Pausa/reanudación y obtención de estado detallado
+
 ### 🔗 **Comunicaciones Robusta de 3 Capas**
 1. **MQTT en tiempo real** (IoT) - 1 segundo de latencia
 2. **HTTPS de respaldo** - 10 segundos, sincronización garantizada
 3. **Red P2P Mesh** - Comunicación directa entre ambulancias, funciona sin infraestructura
+4. **Dashboard de respaldo**: Interfaz alternativa cuando fallan las comunicaciones principales
 
 ### 🎮 **Dashboard Interactivo Moderno**
 - Interfaz profesional con efectos glass y gradientes

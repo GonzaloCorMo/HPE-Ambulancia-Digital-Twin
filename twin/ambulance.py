@@ -171,13 +171,14 @@ class AmbulanceTwin:
             self.logistics.destination_type = None
             self.logistics.action_message = "Repostando (Bomba conectada)"
         
-        # Finalización de repostaje
-        if self.mechanical.is_refueling and self.mechanical.fuel_level >= 99.0:
+        # Finalización de repostaje - exactamente 100%
+        if self.mechanical.is_refueling and self.mechanical.fuel_level >= 100.0:
             self.mechanical.is_refueling = False
+            self.mechanical.fuel_level = 100.0  # Asegurar exactamente 100%
             self.logistics.mission_status = "ACTIVE"
             self.logistics.destination_type = None
-            self.logistics.action_message = "Tanque lleno, listo para servicio"
-            self.log_callback(f"[{self.id}] ✅ Tanque lleno (100%). Volviendo a estado OPERATIVO.")
+            self.logistics.action_message = "Tanque lleno al 100%, listo para servicio"
+            self.log_callback(f"[{self.id}] ✅ Tanque lleno al 100% exacto. Volviendo a estado OPERATIVO.")
         
         # Mantenimiento preventivo basado en horas de operación
         if (self.mechanical.engine_hours - self.mechanical.last_maintenance_hours > 100.0 and
@@ -256,20 +257,22 @@ class AmbulanceTwin:
             self.https_client):
             
             try:
-                # Enviar solo datos críticos para backup
-                critical_data = {
+                # Enviar solo datos críticos para backup con estructura correcta
+                payload = {
                     "ambulance_id": self.id,
                     "timestamp": current_time,
-                    "position": {
-                        "lat": self.logistics.lat,
-                        "lon": self.logistics.lon
-                    },
-                    "patient_status": self.vitals.patient_status.value if self.vitals.has_patient else PatientStatus.NONE.value,
-                    "fuel_level": self.mechanical.fuel_level,
-                    "mission_status": self.logistics.mission_status
+                    "critical_data": {
+                        "position": {
+                            "lat": self.logistics.lat,
+                            "lon": self.logistics.lon
+                        },
+                        "patient_status": self.vitals.patient_status.value if self.vitals.has_patient else PatientStatus.NONE.value,
+                        "fuel_level": self.mechanical.fuel_level,
+                        "mission_status": self.logistics.mission_status
+                    }
                 }
                 
-                self.https_client.sync_backup(critical_data)
+                self.https_client.sync_backup(payload)
                 self.last_https_sync = current_time
                 self.log_callback(f"[{self.id}] → HTTP | Backup crítico enviado")
                 
