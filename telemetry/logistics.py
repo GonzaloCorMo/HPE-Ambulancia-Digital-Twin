@@ -21,6 +21,9 @@ GRAPH_LOCK = threading.Lock()
 # Jams are geofenced circles: {"lat": ..., "lon": ..., "radius": 0.005}
 JAMS: List[Dict[str, Any]] = []
 
+# Distancia máxima de ruta permitida (rutas más largas son rechazadas)
+MAX_ROUTE_DISTANCE_KM = 150.0
+
 # Enum para tipos de misión
 class MissionStatus(Enum):
     ACTIVE = "ACTIVE"
@@ -29,6 +32,7 @@ class MissionStatus(Enum):
     REFUELING = "REFUELING"
     MAINTENANCE = "MAINTENANCE"
     EMERGENCY = "EMERGENCY"
+    STRANDED = "STRANDED"   # Varada por agotamiento de combustible
 
 class RoadType(Enum):
     URBAN = "urban"
@@ -180,6 +184,15 @@ class LogisticsEngine:
         Returns:
             True si la ruta se calculó correctamente
         """
+        # Protección: rechazar rutas que excedan el límite operativo (vuelos intercontinentales)
+        dist_check = self._calculate_distance(self.lat, self.lon, lat, lon)
+        if dist_check > MAX_ROUTE_DISTANCE_KM:
+            logger.warning(
+                f"[LOGÍSTICA] Destino rechazado para {dest_type}: "
+                f"distancia {dist_check:.1f} km supera el límite de {MAX_ROUTE_DISTANCE_KM} km."
+            )
+            return False
+
         self.destination = (lat, lon)
         self.destination_type = dest_type
         self.route_geometry = []

@@ -140,6 +140,15 @@ function updateMap() {
         } else if (ms === "MAINTENANCE") {
             colorClass = 'marker-amb-maintenance';
             markerText = '🔧';
+        } else if (ms === "STRANDED") {
+            colorClass = 'marker-amb-stranded';
+            markerText = '🪴';
+        }
+
+        // Alerta IA: si el predictor detecta anomalia, sobrescribir apariencia del marcador
+        if (amb.ai_prediction && amb.ai_prediction.anomaly === true) {
+            colorClass = 'marker-amb-anomaly';
+            markerText = '⚠️';
         }
 
         const html = `<div class="${colorClass} w-full h-full rounded-full flex items-center justify-center text-[10px] font-bold text-white shadow-lg">${markerText}</div>`;
@@ -219,38 +228,52 @@ function updateMap() {
                 if (routeCache[destKey]) {
                     markerRefs.ambulances[id]._routeCoords = routeCache[destKey];
                 } else {
+                    const fetchDestKey = destKey; // capturar para el closure
                     fetch(`/api/route/${id}`)
                         .then(r => r.json())
                         .then(data => {
                             if (data.route && data.route.length > 0) {
                                 const coords = data.route;
-                                routeCache[destKey] = coords;
-                                if (markerRefs.ambulances[id]._currentDestKey === destKey) {
+                                routeCache[fetchDestKey] = coords;
+                                // Validar que el destino no cambio durante el fetch
+                                if (markerRefs.ambulances[id] &&
+                                    markerRefs.ambulances[id]._currentDestKey === fetchDestKey) {
                                     markerRefs.ambulances[id]._routeCoords = coords;
                                 }
                             }
-                        }).catch(e => console.error("Offline Route Error:", e));
+                        }).catch(() => { /* Fallo silencioso: normal al cambiar de destino */ });
                 }
             }
 
             // Continuous Frame Update: Slice coordinates by `route_step` to simulate vanishing path
-            if (markerRefs.ambulances[id]._routeCoords) {
-                const step = amb.logistics.route_step || 0;
-                let sliced = markerRefs.ambulances[id]._routeCoords.slice(step);
+            const rawCoords = markerRefs.ambulances[id]._routeCoords;
+            if (rawCoords) {
+                // Proteccion defensiva: validar integridad del array de coordenadas
+                if (!Array.isArray(rawCoords)) {
+                    markerRefs.ambulances[id]._routeCoords = null;
+                } else {
+                    const step = amb.logistics.route_step || 0;
+                    let sliced = rawCoords.slice(step);
+                    // Filtrar pares de coordenadas malformados
+                    sliced = sliced.filter(c =>
+                        Array.isArray(c) && c.length >= 2 &&
+                        c[0] != null && c[1] != null &&
+                        isFinite(c[0]) && isFinite(c[1])
+                    );
+                    if (sliced.length > 0) {
+                        let latlngs = sliced.map(c => [c[0], c[1]]);
+                        latlngs.unshift([lat, lon]); // Hook visually to the current ambulance position
 
-                if (sliced.length > 0) {
-                    let latlngs = sliced.map(c => [c[0], c[1]]);
-                    latlngs.unshift([lat, lon]); // Hook visually to the current ambulance position
-
-                    if (activeRoutes[id]) {
-                        activeRoutes[id].setLatLngs(latlngs);
-                        activeRoutes[id].setStyle(styleObj);
-                    } else {
-                        activeRoutes[id] = L.polyline(latlngs, styleObj).addTo(map);
+                        if (activeRoutes[id]) {
+                            activeRoutes[id].setLatLngs(latlngs);
+                            activeRoutes[id].setStyle(styleObj);
+                        } else {
+                            activeRoutes[id] = L.polyline(latlngs, styleObj).addTo(map);
+                        }
+                    } else if (activeRoutes[id]) {
+                        map.removeLayer(activeRoutes[id]);
+                        delete activeRoutes[id];
                     }
-                } else if (activeRoutes[id]) {
-                    map.removeLayer(activeRoutes[id]);
-                    delete activeRoutes[id];
                 }
             }
 
@@ -507,17 +530,32 @@ setInterval(() => {
     }
 }, 10000);
 
+// Buffer para agrupacion de logs — evita escrituras DOM a 10 Hz y bloqueo del navegador
+const _logBuffer = [];
+let _logFlushScheduled = false;
+
 function addTerminalLog(message) {
     if (!terminalLogs) return;
-    
-    const t = formatTime(new Date());
-    terminalLogs.textContent += `[${t}] ${message}\n`;
-    terminalLogs.scrollTop = terminalLogs.scrollHeight;
 
-    // Prevent giant memory consumption
-    if (terminalLogs.textContent.length > 10000) {
-        terminalLogs.textContent = terminalLogs.textContent.substring(5000);
-    }
+    const t = formatTime(new Date());
+    _logBuffer.push(`[${t}] ${message}`);
+
+    if (_logFlushScheduled) return; // Ya hay un flush programado en el proximo frame
+    _logFlushScheduled = true;
+
+    requestAnimationFrame(() => {
+        _logFlushScheduled = false;
+        if (!terminalLogs || _logBuffer.length === 0) return;
+
+        terminalLogs.textContent += _logBuffer.join('\n') + '\n';
+        _logBuffer.length = 0; // Vaciar buffer
+        terminalLogs.scrollTop = terminalLogs.scrollHeight;
+
+        // Prevenir consumo excesivo de memoria
+        if (terminalLogs.textContent.length > 10000) {
+            terminalLogs.textContent = terminalLogs.textContent.substring(5000);
+        }
+    });
 }
 
 function updateAllStats(state) {
@@ -720,8 +758,12 @@ function updateFleetUI() {
         } else if (ms === "MAINTENANCE") {
             colorTitle = 'text-red-500';
             statusBadge = '🔧 MANTENIMIENTO';
+        } else if (ms === "STRANDED") {
+            colorTitle = 'text-orange-600';
+            statusBadge = '🪴 VARADA';
         }
 
+        const aiAnomaly = amb.ai_prediction && amb.ai_prediction.anomaly === true;
         let card = document.getElementById(`card-${amId}`);
         if (!card) {
             // Create
@@ -731,9 +773,12 @@ function updateFleetUI() {
             card.className = "p-3 rounded-lg border cursor-pointer hover:shadow-md transition-shadow bg-white border-slate-200 hover:border-blue-300";
 
             card.innerHTML = `
-                <div class="flex items-center justify-between mb-2">
+                <div class="flex items-center justify-between mb-2 flex-wrap gap-1">
                     <span class="font-bold cursor-pointer hover:underline text-lg uppercase title-tag ${colorTitle}">🚑 ${amId}</span>
-                    <span class="text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}">${statusBadge}</span>
+                    <div class="flex items-center gap-1">
+                        <span class="status-badge text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}">${statusBadge}</span>
+                        <span class="ai-alert text-xs font-bold text-red-600 animate-pulse${aiAnomaly ? '' : ' hidden'}">&#x26A0;&#xFE0F; FALLO PREVISTO</span>
+                    </div>
                 </div>
                 <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
                     <div class="text-blue-600 truncate tag-vit">
@@ -779,10 +824,20 @@ function updateFleetUI() {
             }
             
             // Update status badge
-            const statusEl = card.querySelector('.text-xs.font-bold');
+            const statusEl = card.querySelector('.status-badge');
             if (statusEl) {
                 statusEl.textContent = statusBadge;
-                statusEl.className = `text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}`;
+                statusEl.className = `status-badge text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}`;
+            }
+
+            // Actualizar alerta IA predictiva
+            const aiAlertEl = card.querySelector('.ai-alert');
+            if (aiAlertEl) {
+                if (aiAnomaly) {
+                    aiAlertEl.classList.remove('hidden');
+                } else {
+                    aiAlertEl.classList.add('hidden');
+                }
             }
 
             // Update strings

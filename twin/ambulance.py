@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional, Callable
 from telemetry.mechanical import MechanicalEngine
 from telemetry.vitals import VitalsEngine, PatientStatus
 from telemetry.logistics import LogisticsEngine
+from telemetry.ai_predictor import predictor as ai_predictor
 
 class AmbulanceTwin:
     """
@@ -50,6 +51,9 @@ class AmbulanceTwin:
         self.last_https_sync = time.time()
         self.communication_errors = 0
         self.operational_hours = 0.0
+
+        # IA: detector de anomalías mecánicas
+        self.ai_anomaly_detected: bool = False
         
         # Configurar logger
         self.logger = logging.getLogger(f"AmbulanceTwin.{self.id}")
@@ -121,6 +125,10 @@ class AmbulanceTwin:
                 )
                 vit_state = self.vitals.step(dt=1.0)
                 
+                # 4.5. Predicción IA de anomalías mecánicas
+                ai_result = ai_predictor.predict_failure(mech_state)
+                self.ai_anomaly_detected = ai_result.get("anomaly", False)
+
                 # 5. Agregar estado completo
                 self.current_state = {
                     "ambulance_id": self.id,
@@ -129,6 +137,7 @@ class AmbulanceTwin:
                     "mechanical": mech_state,
                     "vitals": vit_state,
                     "logistics": log_state,
+                    "ai_prediction": ai_result,
                     "communication_status": self._get_communication_status()
                 }
                 
@@ -186,12 +195,12 @@ class AmbulanceTwin:
             
             self.log_callback(f"[{self.id}] 🔧 Requiere mantenimiento programado ({self.mechanical.engine_hours:.1f}h).")
         
-        # Parada por falta de combustible
+        # Parada por agotamiento total de combustible → estado STRANDED
         if self.mechanical.fuel_level <= 0.0:
             self.logistics.speed = 0.0
             self.logistics.acceleration = 0.0
-            self.logistics.mission_status = "INACTIVE"
-            self.logistics.action_message = "Averiada (Sin combustible)"
+            self.logistics.mission_status = "STRANDED"
+            self.logistics.action_message = "VARADA — Sin combustible"
             self.mechanical.engine_on = False
 
     def _get_communication_status(self) -> Dict[str, Any]:

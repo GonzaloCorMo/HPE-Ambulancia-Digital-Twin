@@ -901,6 +901,25 @@ async def api_ambulance_command(req: AmbulanceCommandRequest):
         logger.error(f"Error ejecutando comando: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/auto_simulation", status_code=200)
+async def api_auto_simulation():
+    """
+    Inicia el modo de simulacion autonoma completo:
+    carga hospitales y gasolineras reales de Madrid, despliega 4 ambulancias,
+    activa la simulacion y arranca el generador automatico de emergencias + anomalias IA.
+    """
+    try:
+        engine.start_auto_simulation()
+        return {
+            "status": "started",
+            "message": "Simulacion autonoma iniciada. Emergencias cada 20-30s.",
+            "ambulances": len(engine.ambulances),
+            "is_simulating": engine.is_simulating,
+        }
+    except Exception as e:
+        logger.error(f"Error iniciando simulacion autonoma: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # 6. WebSocket Event Handlers
 @sio.event
 async def connect(sid, environ):

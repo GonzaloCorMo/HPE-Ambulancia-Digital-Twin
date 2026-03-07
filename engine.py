@@ -1,3 +1,4 @@
+import random
 import time
 import math
 import uuid
@@ -5,7 +6,10 @@ import threading
 import logging
 from typing import Dict, List, Optional, Any, Tuple, Callable
 from main import launch_ambulance
-from telemetry.logistics import POIS, JAMS, MissionStatus
+from telemetry.logistics import POIS, JAMS, MissionStatus, add_poi
+
+# Distancia maxima operativa: asignaciones mas largas son rechazadas automaticamente
+MAX_OPERATIONAL_DISTANCE_KM = 150.0
 
 logger = logging.getLogger(__name__)
 
@@ -209,8 +213,12 @@ class SimulatorEngine:
         dist_to_emergency = self._calculate_distance_km(
             amb_lat, amb_lon, emergency["lat"], emergency["lon"]
         )
-        
-        # Distancia de emergencia al hospital más cercano
+
+        # Rechazar si supera el limite operativo (evita asignaciones intercontinentales)
+        if dist_to_emergency > MAX_OPERATIONAL_DISTANCE_KM:
+            return 0.0
+
+        # Distancia de emergencia al hospital mas cercano
         if hospitals:
             hospital_distances = [
                 self._calculate_distance_km(
@@ -272,7 +280,20 @@ class SimulatorEngine:
         """
         emergency_id = emergency["id"]
         ambulance_id = ambulance.id
-        
+
+        # Pre-verificar limite de distancia operativa antes de asignar
+        amb_lat_pre = getattr(ambulance.logistics, 'lat', 0)
+        amb_lon_pre = getattr(ambulance.logistics, 'lon', 0)
+        dist_pre = self._calculate_distance_km(
+            amb_lat_pre, amb_lon_pre, emergency["lat"], emergency["lon"]
+        )
+        if dist_pre > MAX_OPERATIONAL_DISTANCE_KM:
+            self.log_network(
+                f"[DISPATCH] Asignacion bloqueada: {ambulance_id} esta a {dist_pre:.0f} km "
+                f"(limite operativo: {MAX_OPERATIONAL_DISTANCE_KM} km)."
+            )
+            return
+
         # Actualizar estado de emergencia
         emergency["status"] = "PROCESSING"
         emergency["assigned_ambulance"] = ambulance_id
@@ -323,6 +344,7 @@ class SimulatorEngine:
             try:
                 self._monitor_emergency_progress()
                 self._manage_idle_ambulances()
+                self._manage_proactive_refueling()
                 self._update_statistics()
                 
             except Exception as e:
@@ -351,8 +373,21 @@ class SimulatorEngine:
             # Emergencia en transporte (yendo al hospital)
             elif emergency["status"] == "TRANSPORTING":
                 self._handle_transporting_emergency(emergency, ambulance, current_time)
-            
-            # Verificar timeout (15 minutos máximo)
+
+            # Ambulancia varada sin combustible: liberar urgencia y reasignar
+            mission_now = getattr(ambulance.logistics, 'mission_status', '')
+            if mission_now == "STRANDED" and emergency["status"] in ("PROCESSING", "TRANSPORTING"):
+                self.log_network(
+                    f"[DISPATCH] Unidad {amb_id} varada sin combustible. "
+                    f"Reasignando urgencia {em_id}..."
+                )
+                self._release_ambulance(ambulance)
+                emergency["status"] = "INITIATED"
+                emergency["assigned_ambulance"] = None
+                emergency.pop("assigned_at", None)
+                self.evaluate_fleet_assignments()
+
+            # Verificar timeout (15 minutos maximo)
             if current_time - emergency.get("created_at", current_time) > 900:  # 15 minutos
                 self.log_network(f"[TIMEOUT] ⏱️ Urgencia {em_id} excedió tiempo máximo de respuesta.")
                 emergency["status"] = "TIMEOUT"
@@ -493,6 +528,49 @@ class SimulatorEngine:
                             nearest_hospital["lat"], nearest_hospital["lon"], "BASE"
                         )
                         ambulance.logistics.action_message = "Regresando a Base"
+
+    def _manage_proactive_refueling(self) -> None:
+        """
+        Repostaje proactivo: si una ambulancia libre tiene combustible < 20%
+        y no esta transportando a un paciente critico, la redirige automaticamente
+        a la gasolinera mas cercana antes de aceptar nuevas emergencias.
+        """
+        if not self.is_simulating:
+            return
+
+        gas_stations = [p for p in POIS if p.get("type") == "GAS_STATION"]
+        if not gas_stations:
+            return
+
+        for ambulance in self.ambulances.values():
+            fuel         = getattr(ambulance.mechanical, 'fuel_level',    100.0)
+            has_patient  = getattr(ambulance.vitals,     'has_patient',   False)
+            mission      = getattr(ambulance.logistics,  'mission_status', '')
+            is_refueling = getattr(ambulance.mechanical, 'is_refueling',   False)
+
+            # Actuar solo sobre ambulancias activas, sin paciente, con poco combustible
+            # y que no tengan ruta activa
+            if not (
+                fuel < 20.0
+                and not has_patient
+                and not is_refueling
+                and mission == MissionStatus.ACTIVE.value
+                and hasattr(ambulance.logistics, 'destination')
+                and ambulance.logistics.destination is None
+            ):
+                continue
+
+            if hasattr(ambulance.logistics, 'route_to_nearest'):
+                success = ambulance.logistics.route_to_nearest("GAS_STATION")
+                if success:
+                    ambulance.logistics.mission_status = MissionStatus.INACTIVE.value
+                    ambulance.logistics.action_message = (
+                        f"Repostaje preventivo ({fuel:.0f}% restante)"
+                    )
+                    self.log_network(
+                        f"[COMBUSTIBLE] {ambulance.id} — Repostaje proactivo iniciado "
+                        f"(combustible al {fuel:.0f}%)."
+                    )
 
     def _update_statistics(self) -> None:
         """Actualiza estadísticas del sistema."""
@@ -687,3 +765,154 @@ class SimulatorEngine:
             details.update(ambulance.get_detailed_status())
         
         return details
+
+    # ------------------------------------------------------------------
+    # MODO DE SIMULACION AUTONOMA
+    # ------------------------------------------------------------------
+
+    def start_auto_simulation(self) -> None:
+        """
+        Inicia el modo de simulacion autonoma con infraestructura real de Madrid:
+          - 3 hospitales reales + 2 gasolineras predefinidas
+          - 4 ambulancias distribuidas por la capital
+          - Hilo daemon que genera emergencias aleatorias cada 20-30 segundos
+          - Inyeccion periodica de anomalias mecanicas para demostrar el predictor IA
+        """
+        self.log_network("[AUTO-SIM] Iniciando simulacion autonoma de Madrid...")
+
+        # --- 1. Hospitales reales de Madrid ---
+        madrid_hospitals = [
+            (40.4812, -3.6868, "Hospital La Paz"),
+            (40.4210, -3.6716, "Hospital Gregorio Maranon"),
+            (40.3764, -3.6977, "Hospital 12 de Octubre"),
+        ]
+        for lat, lon, name in madrid_hospitals:
+            add_poi("HOSPITAL", lat, lon, name)
+            self.log_network(f"[AUTO-SIM] {name} registrado en ({lat:.4f}, {lon:.4f})")
+
+        # --- 2. Gasolineras predefinidas ---
+        madrid_gas = [
+            (40.4500, -3.6900, "Repsol Castellana"),
+            (40.4070, -3.6930, "Cepsa Atocha"),
+        ]
+        for lat, lon, name in madrid_gas:
+            add_poi("GAS_STATION", lat, lon, name)
+            self.log_network(f"[AUTO-SIM] Gasolinera {name} registrada en ({lat:.4f}, {lon:.4f})")
+
+        # --- 3. Desplegar 4 ambulancias repartidas por Madrid ---
+        initial_positions = [
+            (40.4700, -3.7200),  # Noroeste (Moncloa)
+            (40.4300, -3.6900),  # Centro-sur (Lavapies)
+            (40.4600, -3.6500),  # Este (Salamanca)
+            (40.4000, -3.7100),  # Sur (Carabanchel)
+        ]
+        for lat, lon in initial_positions:
+            try:
+                am_id = self.spawn_ambulance(lat, lon)
+                self.log_network(
+                    f"[AUTO-SIM] Unidad {am_id} desplegada en ({lat:.4f}, {lon:.4f})"
+                )
+            except Exception as exc:
+                logger.warning(f"[AUTO-SIM] No se pudo desplegar ambulancia: {exc}")
+
+        # --- 4. Activar simulacion ---
+        if not self.is_simulating:
+            self.toggle_playback()
+
+        # --- 5. Iniciar hilo generador de emergencias (solo uno a la vez) ---
+        if getattr(self, '_auto_sim_active', False):
+            self.log_network("[AUTO-SIM] Hilo de simulacion automatica ya activo.")
+            return
+
+        self._auto_sim_active = True
+        self._auto_sim_thread = threading.Thread(
+            target=self._auto_emergency_loop,
+            daemon=True,
+            name="AutoSimThread"
+        )
+        self._auto_sim_thread.start()
+        self.log_network(
+            "[AUTO-SIM] Simulacion autonoma activa. "
+            "Emergencias cada 20-30s, anomalias IA cada 2 min."
+        )
+
+    def _auto_emergency_loop(self) -> None:
+        """
+        Bucle daemon: genera emergencias aleatorias e inyecta anomalias mecanicas
+        periodicas para que el predictor IA pueda activarse y verse en el frontend.
+        """
+        last_anomaly_injection = time.time()
+        ANOMALY_INTERVAL = 120.0  # segundos entre inyecciones de anomalia
+        FAULT_TYPES = ["overheating", "low_oil", "brake_failure", "battery_drain"]
+        SEVERITIES   = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+        while self.running and getattr(self, '_auto_sim_active', False):
+            if not self.is_simulating:
+                time.sleep(1.0)
+                continue
+
+            try:
+                # Esperar 20-30 s (acelerado por speed_multiplier)
+                sleep_s = random.uniform(20.0, 30.0) / max(1, self.speed_multiplier)
+                time.sleep(sleep_s)
+
+                if not self.is_simulating or not self.running:
+                    break
+
+                # Emergencia aleatoria dentro de ~10 km del centro de Madrid
+                em_lat, em_lon = self._generate_random_madrid_coords(radius_km=10.0)
+                severity = random.choice(SEVERITIES)
+                em_id = self.spawn_emergency(em_lat, em_lon, severity)
+                self.log_network(
+                    f"[AUTO-SIM] Emergencia auto-generada {em_id} "
+                    f"({severity}) en ({em_lat:.4f}, {em_lon:.4f})"
+                )
+
+                # Inyeccion periodica de anomalia para demostrar el predictor IA
+                now = time.time()
+                if (now - last_anomaly_injection) >= ANOMALY_INTERVAL and self.ambulances:
+                    target_id = random.choice(list(self.ambulances.keys()))
+                    target_amb = self.ambulances[target_id]
+                    fault = random.choice(FAULT_TYPES)
+                    if hasattr(target_amb.mechanical, 'inject_fault'):
+                        target_amb.mechanical.inject_fault(fault)
+                        self.log_network(
+                            f"[AUTO-SIM] Anomalia '{fault}' inyectada en {target_id} "
+                            f"- Predictor IA deberia detectarla en breve."
+                        )
+                    last_anomaly_injection = now
+
+            except Exception as exc:
+                logger.error(f"[AUTO-SIM] Error en bucle automatico: {exc}")
+                time.sleep(5.0)
+
+    def _generate_random_madrid_coords(self, radius_km: float = 10.0) -> tuple:
+        """
+        Genera coordenadas aleatorias dentro de un radio dado desde el centro de Madrid.
+
+        Args:
+            radius_km: Radio maximo en kilometros.
+
+        Returns:
+            (lat, lon) como floats redondeados a 6 decimales.
+        """
+        CENTER_LAT = 40.4168
+        CENTER_LON = -3.7038
+        R = 6371.0  # Radio terrestre en km
+
+        distance_km = random.uniform(0.5, radius_km)
+        bearing_rad = random.uniform(0.0, 2.0 * math.pi)
+
+        lat1 = math.radians(CENTER_LAT)
+        lon1 = math.radians(CENTER_LON)
+
+        lat2 = math.asin(
+            math.sin(lat1) * math.cos(distance_km / R)
+            + math.cos(lat1) * math.sin(distance_km / R) * math.cos(bearing_rad)
+        )
+        lon2 = lon1 + math.atan2(
+            math.sin(bearing_rad) * math.sin(distance_km / R) * math.cos(lat1),
+            math.cos(distance_km / R) - math.sin(lat1) * math.sin(lat2)
+        )
+
+        return round(math.degrees(lat2), 6), round(math.degrees(lon2), 6)
