@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional, Callable
 from telemetry.mechanical import MechanicalEngine
 from telemetry.vitals import VitalsEngine, PatientStatus
 from telemetry.logistics import LogisticsEngine
-from telemetry.ai_predictor import predictor as ai_predictor
+from telemetry.ai_predictor import predictor as ai_predictor, rul_predictor
 
 class AmbulanceTwin:
     """
@@ -134,6 +134,9 @@ class AmbulanceTwin:
                 ai_result = ai_predictor.predict_failure(mech_state)
                 self.ai_anomaly_detected = ai_result.get("anomaly", False)
 
+                # 4.6. Predicción de Vida Útil Restante (RUL) del motor
+                rul_result = rul_predictor.predict_rul(mech_state)
+
                 # 5. Agregar estado completo
                 self.current_state = {
                     "ambulance_id": self.id,
@@ -142,7 +145,7 @@ class AmbulanceTwin:
                     "mechanical": mech_state,
                     "vitals": vit_state,
                     "logistics": log_state,
-                    "ai_prediction": ai_result,
+                    "ai_prediction": {**ai_result, "rul": rul_result},
                     "communication_status": self._get_communication_status()
                 }
                 

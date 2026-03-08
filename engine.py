@@ -6,10 +6,184 @@ import threading
 import logging
 from typing import Dict, List, Optional, Any, Tuple, Callable
 from main import launch_ambulance
-from telemetry.logistics import POIS, JAMS, MissionStatus, add_poi
+from telemetry.logistics import (
+    POIS, JAMS, MissionStatus, add_poi, add_jam, remove_jam, ensure_graph_for_area
+)
 
 # Distancia maxima operativa: asignaciones mas largas son rechazadas automaticamente
 MAX_OPERATIONAL_DISTANCE_KM = 150.0
+
+# Presets de escenarios predefinidos con infraestructura
+SCENARIO_PRESETS = {
+    "madrid": {
+        "name": "Madrid",
+        "hospitals": [
+            (40.4812, -3.6868, "Hospital La Paz"),
+            (40.4210, -3.6716, "Hospital Gregorio Marañón"),
+            (40.3764, -3.6977, "Hospital 12 de Octubre"),
+        ],
+        "gas_stations": [
+            (40.4500, -3.6900, "Repsol Castellana"),
+            (40.4070, -3.6930, "Cepsa Atocha"),
+        ],
+        "ambulance_positions": [
+            (40.4700, -3.7200),
+            (40.4300, -3.6900),
+            (40.4600, -3.6500),
+            (40.4000, -3.7100),
+        ],
+    },
+    "barcelona": {
+        "name": "Barcelona",
+        "hospitals": [
+            (41.3900, 2.1530, "Hospital Clínic de Barcelona"),
+            (41.4018, 2.1734, "Hospital de la Vall d'Hebron"),
+            (41.3807, 2.1586, "Hospital de la Santa Creu i Sant Pau"),
+        ],
+        "gas_stations": [
+            (41.3950, 2.1600, "Repsol Diagonal"),
+            (41.3850, 2.1700, "BP Gran Via"),
+        ],
+        "ambulance_positions": [
+            (41.3850, 2.1500),
+            (41.3950, 2.1750),
+            (41.4050, 2.1600),
+            (41.3780, 2.1650),
+        ],
+    },
+    "sevilla": {
+        "name": "Sevilla",
+        "hospitals": [
+            (37.3927, -5.9876, "Hospital Virgen del Rocío"),
+            (37.3762, -5.9905, "Hospital Virgen Macarena"),
+        ],
+        "gas_stations": [
+            (37.3858, -5.9800, "Cepsa Sevilla Centro"),
+            (37.3720, -5.9760, "Repsol Macarena"),
+        ],
+        "ambulance_positions": [
+            (37.3890, -5.9850),
+            (37.3780, -5.9780),
+            (37.3960, -5.9920),
+        ],
+    },
+    "valencia": {
+        "name": "Valencia",
+        "hospitals": [
+            (39.4669, -0.3763, "Hospital La Fe"),
+            (39.4762, -0.3765, "Hospital Clínico Universitario Valencia"),
+        ],
+        "gas_stations": [
+            (39.4700, -0.3800, "Galp Valencia Norte"),
+            (39.4650, -0.3720, "Repsol Av. del Cid"),
+        ],
+        "ambulance_positions": [
+            (39.4720, -0.3810),
+            (39.4650, -0.3750),
+            (39.4730, -0.3700),
+        ],
+    },
+    "cdmx": {
+        "name": "Ciudad de México",
+        "hospitals": [
+            (19.4004, -99.1502, "Hospital General de México"),
+            (19.4285, -99.1436, "Hospital ABC Observatorio"),
+            (19.3736, -99.1572, "IMSS Centro Médico"),
+        ],
+        "gas_stations": [
+            (19.4100, -99.1600, "PEMEX Insurgentes"),
+            (19.3900, -99.1450, "PEMEX Eje 6 Sur"),
+        ],
+        "ambulance_positions": [
+            (19.4050, -99.1550),
+            (19.4250, -99.1500),
+            (19.3850, -99.1600),
+            (19.4150, -99.1350),
+        ],
+    },
+    "guadalajara": {
+        "name": "Guadalajara (MX)",
+        "hospitals": [
+            (20.6774, -103.3475, "Hospital Civil de Guadalajara"),
+            (20.6890, -103.3680, "Hospital México Americano"),
+        ],
+        "gas_stations": [
+            (20.6800, -103.3550, "PEMEX Av. Vallarta"),
+            (20.6720, -103.3400, "PEMEX Federalismo"),
+        ],
+        "ambulance_positions": [
+            (20.6820, -103.3480),
+            (20.6750, -103.3600),
+            (20.6880, -103.3380),
+        ],
+    },
+    "monterrey": {
+        "name": "Monterrey (MX)",
+        "hospitals": [
+            (25.6716, -100.3091, "Hospital Universitario UANL"),
+            (25.6822, -100.3183, "Hospital Christus Muguerza"),
+        ],
+        "gas_stations": [
+            (25.6760, -100.3100, "PEMEX Av. Lázaro Cárdenas"),
+            (25.6680, -100.2980, "PEMEX Revolución"),
+        ],
+        "ambulance_positions": [
+            (25.6740, -100.3050),
+            (25.6810, -100.3200),
+            (25.6650, -100.3150),
+        ],
+    },
+    "bogota": {
+        "name": "Bogotá",
+        "hospitals": [
+            (4.6286, -74.0978, "Hospital San Ignacio"),
+            (4.6552, -74.0830, "Hospital El Tunal"),
+            (4.6015, -74.0736, "Hospital Santa Clara"),
+        ],
+        "gas_stations": [
+            (4.6350, -74.0900, "Terpel Cra 7"),
+            (4.6150, -74.0850, "Primax Av. 68"),
+        ],
+        "ambulance_positions": [
+            (4.6300, -74.0950),
+            (4.6500, -74.0800),
+            (4.6080, -74.0780),
+            (4.6420, -74.0860),
+        ],
+    },
+    "medellin": {
+        "name": "Medellín",
+        "hospitals": [
+            (6.2442, -75.5936, "Hospital General de Medellín"),
+            (6.2694, -75.5607, "Clínica Las Américas"),
+        ],
+        "gas_stations": [
+            (6.2510, -75.5800, "Terpel El Centro"),
+            (6.2630, -75.5650, "Primax Laureles"),
+        ],
+        "ambulance_positions": [
+            (6.2480, -75.5870),
+            (6.2600, -75.5700),
+            (6.2380, -75.5760),
+        ],
+    },
+    "cali": {
+        "name": "Cali",
+        "hospitals": [
+            (3.4516, -76.5320, "Hospital Universitario del Valle"),
+            (3.4660, -76.5210, "Clínica Imbanaco"),
+        ],
+        "gas_stations": [
+            (3.4570, -76.5280, "Terpel Cra 1"),
+            (3.4630, -76.5150, "Primax Av. Roosevelt"),
+        ],
+        "ambulance_positions": [
+            (3.4540, -76.5300),
+            (3.4680, -76.5240),
+            (3.4480, -76.5180),
+        ],
+    },
+}
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +217,10 @@ class SimulatorEngine:
         self.emergencies_handled = 0
         self.total_response_time = 0.0
         self.average_response_time = 0.0
+
+        # Flags de simulación autónoma
+        self._auto_sim_active: bool = False
+        self._auto_jam_active: bool = False
         
         # Iniciar hilo de despacho
         self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True)
@@ -58,6 +236,17 @@ class SimulatorEngine:
         """Envía mensaje al logger."""
         if self.log_callback:
             self.log_callback(message)
+
+    def _is_within_operational_area(self, lat: float, lon: float) -> bool:
+        """Devuelve True si las coordenadas están cerca de algún hospital del mapa."""
+        hospitals = [p for p in POIS if p.get("type") == "HOSPITAL"]
+        if not hospitals:
+            return True  # Sin hospitales, toda ubicación es válida
+        return any(
+            self._calculate_distance_km(lat, lon, h["lat"], h["lon"])
+            <= MAX_OPERATIONAL_DISTANCE_KM
+            for h in hospitals
+        )
 
     def spawn_ambulance(self, lat: float, lon: float) -> str:
         """
@@ -78,11 +267,14 @@ class SimulatorEngine:
             )
             self.ambulances[am_id].speed_multiplier = self.speed_multiplier
             self.ambulances[am_id].is_paused = not self.is_simulating
-            
-            # Estado inicial: ir a gasolinera si hay poca gasolina
-            if hasattr(self.ambulances[am_id].logistics, 'route_to_nearest'):
-                self.ambulances[am_id].logistics.route_to_nearest("GAS_STATION")
-            
+
+            # Solo auto-enrutar si la ambulancia está cerca de algún hospital.
+            if self._is_within_operational_area(lat, lon):
+                if hasattr(self.ambulances[am_id].logistics, 'route_to_nearest'):
+                    self.ambulances[am_id].logistics.route_to_nearest("GAS_STATION")
+            else:
+                self.ambulances[am_id].logistics.action_message = "Fuera de área operativa - En espera"
+
             self.log_network(f"[SISTEMA] 🚑 Nueva unidad {am_id} desplegada en ({lat:.4f}, {lon:.4f}).")
             return am_id
             
@@ -220,6 +412,10 @@ class SimulatorEngine:
 
         # Rechazar si supera el limite operativo (evita asignaciones intercontinentales)
         if dist_to_emergency > MAX_OPERATIONAL_DISTANCE_KM:
+            return 0.0
+
+        # Rechazar si la ambulancia está lejos de todos los hospitales
+        if not self._is_within_operational_area(amb_lat, amb_lon):
             return 0.0
 
         # Distancia de emergencia al hospital mas cercano
@@ -499,15 +695,17 @@ class SimulatorEngine:
         
         for ambulance in self.ambulances.values():
             # Solo ambulancias activas sin destino y con combustible >= 30%.
-            # Las de bajo combustible son gestionadas por _manage_proactive_refueling,
-            # que ya corre antes en el loop. Sin este guard, idle ruteaba a BASE
-            # ambulancias en la zona muerta 20-30% que el dispatcher rechaza,
-            # dejandolas paralizadas indefinidamente.
+            # Las de bajo combustible son gestionadas por _manage_proactive_refueling.
+            # Tampoco procesar ambulancias fuera del área operativa (lejos de hospitales).
             if (hasattr(ambulance.logistics, 'mission_status') and 
                 ambulance.logistics.mission_status == MissionStatus.ACTIVE.value and
                 hasattr(ambulance.logistics, 'destination') and
                 ambulance.logistics.destination is None and
-                getattr(ambulance.mechanical, 'fuel_level', 100.0) >= 30.0):
+                getattr(ambulance.mechanical, 'fuel_level', 100.0) >= 30.0 and
+                self._is_within_operational_area(
+                    getattr(ambulance.logistics, 'lat', 0.0),
+                    getattr(ambulance.logistics, 'lon', 0.0)
+                )):
                 
                 # Verificar si ya está en un hospital
                 at_hospital = False
@@ -556,11 +754,14 @@ class SimulatorEngine:
             has_patient  = getattr(ambulance.vitals,     'has_patient',   False)
             mission      = getattr(ambulance.logistics,  'mission_status', '')
             is_refueling = getattr(ambulance.mechanical, 'is_refueling',   False)
+            amb_lat      = getattr(ambulance.logistics,  'lat', 0.0)
+            amb_lon      = getattr(ambulance.logistics,  'lon', 0.0)
 
             # Actuar sobre ambulancias activas, sin paciente, combustible < 30%,
             # sin ruta activa y sin repostaje ya en progreso.
             # Umbral en 30% = mismo umbral del dispatcher (_is_ambulance_available),
             # cerrando la zona muerta 20-30% donde las ambulancias quedaban paralizadas.
+            # Tampoco repostar ambulancias fuera del área operativa (lejos de hospitales).
             if not (
                 fuel < 30.0
                 and not has_patient
@@ -569,6 +770,7 @@ class SimulatorEngine:
                 and mission == MissionStatus.ACTIVE.value
                 and hasattr(ambulance.logistics, 'destination')
                 and ambulance.logistics.destination is None
+                and self._is_within_operational_area(amb_lat, amb_lon)
             ):
                 continue
 
@@ -670,6 +872,10 @@ class SimulatorEngine:
         JAMS.clear()
         
         self.active_emergencies.clear()
+
+        # Detener hilos de simulación autónoma
+        self._auto_sim_active = False
+        self._auto_jam_active = False
         
         # Resetear estadísticas
         self.emergencies_handled = 0
@@ -780,85 +986,120 @@ class SimulatorEngine:
         return details
 
     # ------------------------------------------------------------------
-    # MODO DE SIMULACION AUTONOMA
+    # PRESETS Y SIMULACIÓN AUTÓNOMA
     # ------------------------------------------------------------------
 
-    def start_auto_simulation(self) -> None:
+    def load_preset(self, preset_name: str) -> bool:
         """
-        Inicia el modo de simulacion autonoma con infraestructura real de Madrid:
-          - 3 hospitales reales + 2 gasolineras predefinidas
-          - 4 ambulancias distribuidas por la capital
-          - Hilo daemon que genera emergencias aleatorias cada 20-30 segundos
-          - Inyeccion periodica de anomalias mecanicas para demostrar el predictor IA
+        Carga un preset de escenario (hospitales, gasolineras, ambulancias).
+        Limpia el escenario actual antes de cargar.
         """
-        # Evitar doble inicializacion: si el hilo ya corre, notificar y salir
-        if getattr(self, '_auto_sim_active', False):
-            self.log_network("[AUTO-SIM] Hilo de simulacion automatica ya activo.")
-            return
+        if preset_name not in SCENARIO_PRESETS:
+            self.log_network(f"[SISTEMA] Preset '{preset_name}' no encontrado.")
+            return False
 
-        self.log_network("[AUTO-SIM] Iniciando simulacion autonoma de Madrid...")
+        preset = SCENARIO_PRESETS[preset_name]
+        self.log_network(f"[SISTEMA] Cargando preset: {preset['name']}...")
 
-        # --- 1. Hospitales reales de Madrid ---
-        madrid_hospitals = [
-            (40.4812, -3.6868, "Hospital La Paz"),
-            (40.4210, -3.6716, "Hospital Gregorio Maranon"),
-            (40.3764, -3.6977, "Hospital 12 de Octubre"),
-        ]
-        for lat, lon, name in madrid_hospitals:
+        # Limpiar escenario actual
+        self.clear_all_scenario()
+
+        # Cargar hospitales
+        for lat, lon, name in preset["hospitals"]:
             add_poi("HOSPITAL", lat, lon, name)
-            self.log_network(f"[AUTO-SIM] {name} registrado en ({lat:.4f}, {lon:.4f})")
+            self.log_network(f"[PRESET] 🏥 {name} en ({lat:.4f}, {lon:.4f})")
 
-        # --- 2. Gasolineras predefinidas ---
-        madrid_gas = [
-            (40.4500, -3.6900, "Repsol Castellana"),
-            (40.4070, -3.6930, "Cepsa Atocha"),
-        ]
-        for lat, lon, name in madrid_gas:
+        # Disparar descarga del grafo viario para esta ciudad (en background)
+        hospital_coords = [(lat, lon) for lat, lon, _ in preset["hospitals"]]
+        center_lat = sum(h[0] for h in hospital_coords) / len(hospital_coords)
+        center_lon = sum(h[1] for h in hospital_coords) / len(hospital_coords)
+        max_spread_km = max(
+            self._calculate_distance_km(h[0], h[1], center_lat, center_lon)
+            for h in hospital_coords
+        ) if len(hospital_coords) > 1 else 0.0
+        radius_m = max(6000, int((max_spread_km + 4.0) * 1000))
+        self.log_network(f"[PRESET] 🗺️ Preparando red viaria para {preset['name']} (r={radius_m//1000}km)...")
+        ensure_graph_for_area(center_lat, center_lon, radius_m, preset_name)
+
+        # Cargar gasolineras
+        for lat, lon, name in preset["gas_stations"]:
             add_poi("GAS_STATION", lat, lon, name)
-            self.log_network(f"[AUTO-SIM] Gasolinera {name} registrada en ({lat:.4f}, {lon:.4f})")
+            self.log_network(f"[PRESET] ⛽ {name} en ({lat:.4f}, {lon:.4f})")
 
-        # --- 3. Desplegar 4 ambulancias repartidas por Madrid ---
-        initial_positions = [
-            (40.4700, -3.7200),  # Noroeste (Moncloa)
-            (40.4300, -3.6900),  # Centro-sur (Lavapies)
-            (40.4600, -3.6500),  # Este (Salamanca)
-            (40.4000, -3.7100),  # Sur (Carabanchel)
-        ]
-        for lat, lon in initial_positions:
+        # Desplegar ambulancias
+        for lat, lon in preset["ambulance_positions"]:
             try:
                 am_id = self.spawn_ambulance(lat, lon)
-                self.log_network(
-                    f"[AUTO-SIM] Unidad {am_id} desplegada en ({lat:.4f}, {lon:.4f})"
-                )
-            except Exception as exc:
-                logger.warning(f"[AUTO-SIM] No se pudo desplegar ambulancia: {exc}")
+                self.log_network(f"[PRESET] 🚑 {am_id} en ({lat:.4f}, {lon:.4f})")
+            except Exception as e:
+                logger.warning(f"[PRESET] Error desplegando ambulancia: {e}")
 
-        # --- 4. Activar simulacion ---
+        self.log_network(
+            f"[SISTEMA] ✅ Preset '{preset['name']}' cargado: "
+            f"{len(preset['hospitals'])} hospitales, "
+            f"{len(preset['gas_stations'])} gasolineras, "
+            f"{len(preset['ambulance_positions'])} ambulancias."
+        )
+        return True
+
+    def start_auto_simulation(self) -> tuple:
+        """
+        Inicia la generación automática de eventos (emergencias, atascos, anomalías).
+        Requiere que existan hospitales y ambulancias en el mapa.
+
+        Returns:
+            (success: bool, message: str)
+        """
+        if getattr(self, '_auto_sim_active', False):
+            self.log_network("[AUTO-SIM] Simulación autónoma ya activa.")
+            return False, "La simulación autónoma ya está activa."
+
+        hospitals = [p for p in POIS if p.get("type") == "HOSPITAL"]
+        if not hospitals:
+            msg = "No hay hospitales en el mapa. Carga un preset o añade hospitales manualmente."
+            self.log_network(f"[AUTO-SIM] ⚠️ {msg}")
+            return False, msg
+
+        if not self.ambulances:
+            msg = "No hay ambulancias desplegadas. Carga un preset primero."
+            self.log_network(f"[AUTO-SIM] ⚠️ {msg}")
+            return False, msg
+
+        self.log_network("[AUTO-SIM] Iniciando generación automática de eventos...")
+
         if not self.is_simulating:
             self.toggle_playback()
 
-        # --- 5. Iniciar hilo generador de emergencias ---
+        # Hilo generador de emergencias + anomalías
         self._auto_sim_active = True
         self._auto_sim_thread = threading.Thread(
-            target=self._auto_emergency_loop,
-            daemon=True,
-            name="AutoSimThread"
+            target=self._auto_emergency_loop, daemon=True, name="AutoSimThread"
         )
         self._auto_sim_thread.start()
-        self.log_network(
-            "[AUTO-SIM] Simulacion autonoma activa. "
-            "Emergencias cada 20-30s, anomalias IA cada 2 min."
+
+        # Hilo generador de atascos
+        self._auto_jam_active = True
+        self._auto_jam_thread = threading.Thread(
+            target=self._auto_jam_loop, daemon=True, name="AutoJamThread"
         )
+        self._auto_jam_thread.start()
+
+        msg = "Simulación autónoma activa. Emergencias y atascos se generarán automáticamente."
+        self.log_network(f"[AUTO-SIM] ✅ {msg}")
+        return True, msg
+
+    def stop_auto_simulation(self) -> None:
+        """Detiene la generación automática de eventos."""
+        self._auto_sim_active = False
+        self._auto_jam_active = False
+        self.log_network("[AUTO-SIM] Generación automática de eventos detenida.")
 
     def _auto_emergency_loop(self) -> None:
-        """
-        Bucle daemon: genera emergencias aleatorias e inyecta anomalias mecanicas
-        periodicas para que el predictor IA pueda activarse y verse en el frontend.
-        """
+        """Genera emergencias aleatorias cerca de hospitales e inyecta anomalías IA."""
         last_anomaly_injection = time.time()
-        ANOMALY_INTERVAL = 120.0  # segundos entre inyecciones de anomalia
+        ANOMALY_INTERVAL = 120.0
         FAULT_TYPES = ["overheating", "low_oil", "brake_failure", "battery_drain"]
-        SEVERITIES   = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+        SEVERITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
         try:
             while self.running and getattr(self, '_auto_sim_active', False):
@@ -867,15 +1108,18 @@ class SimulatorEngine:
                     continue
 
                 try:
-                    # Esperar 20-30 s (acelerado por speed_multiplier)
                     sleep_s = random.uniform(20.0, 30.0) / max(1, self.speed_multiplier)
                     time.sleep(sleep_s)
 
                     if not self.is_simulating or not self.running:
                         break
 
-                    # Emergencia aleatoria dentro de ~10 km del centro de Madrid
-                    em_lat, em_lon = self._generate_random_madrid_coords(radius_km=10.0)
+                    coords = self._generate_random_coords_near_pois(radius_km=10.0)
+                    if coords is None:
+                        time.sleep(5.0)
+                        continue
+
+                    em_lat, em_lon = coords
                     severity = random.choice(SEVERITIES)
                     em_id = self.spawn_emergency(em_lat, em_lon, severity)
                     self.log_network(
@@ -883,7 +1127,6 @@ class SimulatorEngine:
                         f"({severity}) en ({em_lat:.4f}, {em_lon:.4f})"
                     )
 
-                    # Inyeccion periodica de anomalia para demostrar el predictor IA
                     now = time.time()
                     if (now - last_anomaly_injection) >= ANOMALY_INTERVAL and self.ambulances:
                         target_id = random.choice(list(self.ambulances.keys()))
@@ -892,38 +1135,93 @@ class SimulatorEngine:
                         if hasattr(target_amb.mechanical, 'inject_fault'):
                             target_amb.mechanical.inject_fault(fault)
                             self.log_network(
-                                f"[AUTO-SIM] Anomalia '{fault}' inyectada en {target_id} "
-                                f"- Predictor IA deberia detectarla en breve."
+                                f"[AUTO-SIM] Anomalía '{fault}' inyectada en {target_id}"
                             )
                         last_anomaly_injection = now
 
                 except Exception as exc:
-                    logger.error(f"[AUTO-SIM] Error en bucle automatico: {exc}")
-                    self.log_network(f"[AUTO-SIM] \u26a0\ufe0f Error en iteracion del bucle: {exc}")
+                    logger.error(f"[AUTO-SIM] Error en bucle automático: {exc}")
                     time.sleep(5.0)
         finally:
             self._auto_sim_active = False
-            self.log_network("[AUTO-SIM] Hilo de simulacion autonoma finalizado.")
+            self.log_network("[AUTO-SIM] Hilo de emergencias automáticas finalizado.")
 
-    def _generate_random_madrid_coords(self, radius_km: float = 10.0) -> tuple:
-        """
-        Genera coordenadas aleatorias dentro de un radio dado desde el centro de Madrid.
+    def _auto_jam_loop(self) -> None:
+        """Genera y elimina atascos aleatorios cerca de hospitales."""
+        MAX_JAMS = 3
+        JAM_CAUSES = [
+            "accidente de tráfico",
+            "obras en calzada",
+            "avería de vehículo",
+            "control policial",
+            "manifestación",
+        ]
+        managed_jams: List[Tuple[float, float, float]] = []
 
-        Args:
-            radius_km: Radio maximo en kilometros.
+        try:
+            while self.running and getattr(self, '_auto_jam_active', False):
+                if not self.is_simulating:
+                    time.sleep(2.0)
+                    continue
 
-        Returns:
-            (lat, lon) como floats redondeados a 6 decimales.
-        """
-        CENTER_LAT = 40.4168
-        CENTER_LON = -3.7038
-        R = 6371.0  # Radio terrestre en km
+                now = time.time()
+
+                # Eliminar atascos caducados
+                still_active = []
+                for jlat, jlon, expiry in managed_jams:
+                    if now >= expiry:
+                        removed = remove_jam(jlat, jlon, threshold=0.002)
+                        if removed:
+                            self.log_network(
+                                f"[TRÁFICO] Atasco disuelto en ({jlat:.4f}, {jlon:.4f})"
+                            )
+                    else:
+                        still_active.append((jlat, jlon, expiry))
+                managed_jams = still_active
+
+                # Crear nuevo atasco si hay hueco
+                if len(managed_jams) < MAX_JAMS:
+                    coords = self._generate_random_coords_near_pois(radius_km=8.0)
+                    if coords:
+                        jlat, jlon = coords
+                        severity = round(random.uniform(0.5, 1.0), 2)
+                        cause = random.choice(JAM_CAUSES)
+                        radius = round(random.uniform(0.003, 0.007), 4)
+                        duration_s = random.uniform(60.0, 240.0)
+
+                        add_jam(jlat, jlon, radius=radius, severity=severity, cause=cause)
+                        managed_jams.append((jlat, jlon, now + duration_s))
+                        self.log_network(
+                            f"[TRÁFICO] 🚧 Nuevo atasco: {cause} en ({jlat:.4f}, {jlon:.4f}) "
+                            f"— severidad {severity:.0%}, duración ~{duration_s/60:.1f} min"
+                        )
+
+                wait_s = random.uniform(60.0, 120.0) / max(1, math.sqrt(self.speed_multiplier))
+                time.sleep(wait_s)
+
+        except Exception as exc:
+            logger.error(f"[AUTO-JAM] Error en bucle de atascos: {exc}")
+        finally:
+            for jlat, jlon, _ in managed_jams:
+                remove_jam(jlat, jlon, threshold=0.002)
+            self._auto_jam_active = False
+            self.log_network("[AUTO-JAM] Hilo de atascos automáticos finalizado.")
+
+    def _generate_random_coords_near_pois(self, radius_km: float = 10.0) -> Optional[Tuple[float, float]]:
+        """Genera coordenadas aleatorias cerca de un hospital existente en el mapa."""
+        hospitals = [p for p in POIS if p.get("type") == "HOSPITAL"]
+        if not hospitals:
+            return None
+
+        center = random.choice(hospitals)
+        center_lat, center_lon = center["lat"], center["lon"]
+        R = 6371.0
 
         distance_km = random.uniform(0.5, radius_km)
         bearing_rad = random.uniform(0.0, 2.0 * math.pi)
 
-        lat1 = math.radians(CENTER_LAT)
-        lon1 = math.radians(CENTER_LON)
+        lat1 = math.radians(center_lat)
+        lon1 = math.radians(center_lon)
 
         lat2 = math.asin(
             math.sin(lat1) * math.cos(distance_km / R)

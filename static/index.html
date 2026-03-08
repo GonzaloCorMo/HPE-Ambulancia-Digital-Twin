@@ -233,6 +233,22 @@
                                 <span>LIMPIAR</span>
                             </button>
                         </div>
+                    </div>
+
+                    <!-- Preset Selector -->
+                    <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <div class="flex items-center justify-between mb-3">
+                            <span class="text-sm font-semibold text-slate-700">Escenario</span>
+                        </div>
+                        <div class="flex gap-2 overflow-hidden">
+                            <select id="preset-selector" class="flex-1 min-w-0 px-3 py-2.5 rounded-lg border border-slate-300 text-sm bg-white text-slate-700 focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                                <option value="">-- Seleccionar Preset --</option>
+                            </select>
+                            <button id="btn-load-preset" class="px-4 py-2.5 rounded-lg font-bold flex items-center justify-center space-x-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-700 border border-emerald-200 shadow-sm transition">
+                                <i class="fas fa-download"></i>
+                                <span>Cargar</span>
+                            </button>
+                        </div>
                         <button id="btn-auto-sim" class="w-full mt-2 py-2.5 rounded-lg font-bold flex items-center justify-center space-x-2 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-200 shadow-sm transition">
                             <i class="fas fa-robot"></i>
                             <span>🤖 SIMULACIÓN AUTÓNOMA</span>
@@ -812,7 +828,7 @@
         </div>
     </div>
 
-    <script src="/app_fixed.js?v=3"></script>
+    <script src="/app_fixed.js?v=4"></script>
     
     <script>
         // Inicializar hora actual

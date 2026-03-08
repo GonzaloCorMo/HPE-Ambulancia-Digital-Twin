@@ -763,6 +763,15 @@ function updateFleetUI() {
         // Safe optional-chaining check — avoids crash when ai_prediction is null/undefined
         const aiAnomaly = amb.ai_prediction?.anomaly === true;
 
+        // RUL — Vida Útil Restante del motor
+        const rul = amb.ai_prediction?.rul || null;
+        const rulLevel = rul?.alert_level || 'NORMAL';
+        const rulColorClass = rulLevel === 'CRÍTICO'   ? 'text-red-500'
+                            : rulLevel === 'ALERTA'    ? 'text-orange-500'
+                            : rulLevel === 'PRECAUCIÓN' ? 'text-yellow-500'
+                            : 'text-slate-400';
+        const rulText = rul ? `${rul.hours_remaining}h (${rul.alert_level})` : '— h (N/A)';
+
         // Card border class — recomputed each tick so anomaly state is always reflected
         const cardBase = 'relative p-3 rounded-lg border cursor-pointer hover:shadow-md transition-all bg-white';
         const cardCls = aiAnomaly
@@ -802,6 +811,9 @@ function updateFleetUI() {
                     </div>
                     <div class="text-amber-600 truncate tag-net">
                         <span class="font-semibold">Destino:</span> ${l.destination_type || 'NONE'}
+                    </div>
+                    <div class="col-span-2 truncate tag-rul ${rulColorClass}">
+                        <span class="font-semibold">🔧 RUL Motor:</span> ${rulText}
                     </div>
                 </div>
                 <div class="mt-2 text-xs text-slate-500 truncate action-msg">
@@ -858,6 +870,12 @@ function updateFleetUI() {
             if (tagMech) tagMech.innerHTML = `<span class="font-semibold">Combustible:</span> ${m.fuel_level || 0}%`;
             if (tagLog)  tagLog.innerHTML  = `<span class="font-semibold">Velocidad:</span> ${Math.round(l.speed || 0)} km/h`;
             if (tagNet)  tagNet.innerHTML  = `<span class="font-semibold">Destino:</span> ${l.destination_type || 'NONE'}`;
+
+            const tagRul = card.querySelector('.tag-rul');
+            if (tagRul) {
+                tagRul.className = `col-span-2 truncate tag-rul ${rulColorClass}`;
+                tagRul.innerHTML = `<span class="font-semibold">🔧 RUL Motor:</span> ${rulText}`;
+            }
 
             // Action message — uses stable .action-msg class
             const actionEl = card.querySelector('.action-msg');
@@ -1047,16 +1065,15 @@ if (btnClear) {
 const btnAutoSim = document.getElementById('btn-auto-sim');
 if (btnAutoSim) {
     btnAutoSim.addEventListener('click', () => {
-        if (!confirm('¿Iniciar simulación autónoma de Madrid?\n\nSe desplegarán:\n• 3 hospitales reales (La Paz, Gregorio Marañón, 12 de Octubre)\n• 2 gasolineras estratégicas\n• 4 ambulancias operativas\n\nSe generarán emergencias automáticas cada 20-30 s\ny anomalías IA cada 2 min.')) return;
+        if (!confirm('¿Iniciar simulación autónoma?\n\nSe generarán emergencias y atascos de forma automática.\nRequiere hospitales y ambulancias en el mapa.\n\nSi no has cargado un escenario, selecciona un preset primero.')) return;
         btnAutoSim.disabled = true;
         btnAutoSim.textContent = '⏳ Iniciando...';
         addTerminalLog('[AUTO-SIM] Solicitando simulación autónoma al servidor...');
         postJson('/api/auto_simulation', {})
             .then(data => {
                 if (data.status === 'started') {
-                    addTerminalLog('[AUTO-SIM] 🤖 Simulación autónoma de Madrid iniciada.');
+                    addTerminalLog('[AUTO-SIM] 🤖 Simulación autónoma iniciada.');
                     if (data.message) addTerminalLog(`[AUTO-SIM] ${data.message}`);
-                    if (data.ambulances) addTerminalLog(`[AUTO-SIM] ${data.ambulances} ambulancias desplegadas.`);
                 }
             })
             .catch(e => {
@@ -1065,6 +1082,35 @@ if (btnAutoSim) {
             .finally(() => {
                 btnAutoSim.disabled = false;
                 btnAutoSim.innerHTML = '<i class="fas fa-robot"></i><span>🤖 SIMULACIÓN AUTÓNOMA</span>';
+            });
+    });
+}
+
+// Preset loader
+const btnLoadPreset = document.getElementById('btn-load-preset');
+const presetSelector = document.getElementById('preset-selector');
+if (btnLoadPreset && presetSelector) {
+    btnLoadPreset.addEventListener('click', () => {
+        const presetName = presetSelector.value;
+        if (!presetName) {
+            addTerminalLog('[SISTEMA] Selecciona un preset del desplegable.');
+            return;
+        }
+        if (!confirm(`¿Cargar preset "${presetName}"?\n\nSe limpiará el escenario actual y se cargará la infraestructura del preset.`)) return;
+        btnLoadPreset.disabled = true;
+        addTerminalLog(`[PRESET] Cargando preset "${presetName}"...`);
+        postJson('/api/preset', { name: presetName })
+            .then(data => {
+                if (data.status === 'loaded') {
+                    addTerminalLog(`[PRESET] ✅ ${data.message}`);
+                    if (data.ambulances) addTerminalLog(`[PRESET] ${data.ambulances} ambulancias desplegadas.`);
+                }
+            })
+            .catch(e => {
+                addTerminalLog(`[ERROR] No se pudo cargar el preset: ${e.message}`);
+            })
+            .finally(() => {
+                btnLoadPreset.disabled = false;
             });
     });
 }

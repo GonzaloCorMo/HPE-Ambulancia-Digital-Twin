@@ -5,6 +5,7 @@ import networkx as nx
 import threading
 import time
 import logging
+import requests
 from typing import Dict, List, Tuple, Optional, Any, Literal
 from dataclasses import dataclass
 from enum import Enum
@@ -94,36 +95,198 @@ def remove_jam(lat: float, lon: float, threshold: float = 0.001) -> bool:
     return False
 
 ROUTE_CACHE: Dict[str, List[Tuple[float, float]]] = {}
+
+# --------------------------------------------------------------------------
+# OSRM routing (Docker local, puerto 5001)
+# Se usa como motor principal de rutas; OSMnx actúa como fallback.
+# --------------------------------------------------------------------------
+OSRM_BASE_URL = "http://localhost:5001"
+_OSRM_AVAILABLE: Optional[bool] = None   # None = no comprobado aún
+_OSRM_LAST_CHECK: float = 0.0
+_OSRM_CHECK_INTERVAL: float = 30.0       # Recomprobar disponibilidad cada 30 s
+_OSRM_LOCK = threading.Lock()
+
+
+def _is_osrm_available() -> bool:
+    """Comprueba si el servidor OSRM local está activo. Cachea el resultado."""
+    global _OSRM_AVAILABLE, _OSRM_LAST_CHECK
+    now = time.time()
+    with _OSRM_LOCK:
+        if _OSRM_AVAILABLE is not None and (now - _OSRM_LAST_CHECK) < _OSRM_CHECK_INTERVAL:
+            return _OSRM_AVAILABLE
+        try:
+            r = requests.get(
+                f"{OSRM_BASE_URL}/route/v1/driving/0,0;0,0",
+                timeout=2.0,
+                params={"overview": "false"},
+            )
+            # 200 = OK, 400 = parámetros inválidos pero servidor activo
+            _OSRM_AVAILABLE = r.status_code in (200, 400)
+        except Exception:
+            _OSRM_AVAILABLE = False
+        _OSRM_LAST_CHECK = now
+        if _OSRM_AVAILABLE:
+            logger.info("[OSRM] Servidor disponible en %s", OSRM_BASE_URL)
+        else:
+            logger.warning(
+                "[OSRM] Servidor no disponible en %s — se usará OSMnx como fallback.",
+                OSRM_BASE_URL,
+            )
+        return _OSRM_AVAILABLE
+
+
+def _route_via_osrm(
+    orig_lat: float, orig_lon: float,
+    dest_lat: float, dest_lon: float,
+) -> Optional[List[Tuple[float, float]]]:
+    """
+    Consulta el servidor OSRM local para obtener la geometría de una ruta.
+
+    Returns:
+        Lista de (lat, lon) o None si la consulta falla o no hay ruta.
+    """
+    try:
+        url = (
+            f"{OSRM_BASE_URL}/route/v1/driving/"
+            f"{orig_lon},{orig_lat};{dest_lon},{dest_lat}"
+        )
+        r = requests.get(
+            url,
+            timeout=5.0,
+            params={"overview": "full", "geometries": "geojson"},
+        )
+        if r.status_code != 200:
+            logger.warning("[OSRM] HTTP %s al calcular ruta", r.status_code)
+            return None
+        data = r.json()
+        if data.get("code") != "Ok" or not data.get("routes"):
+            logger.warning("[OSRM] Respuesta inesperada: %s", data.get("code"))
+            return None
+        # OSRM devuelve coordenadas como [lon, lat]; convertir a (lat, lon)
+        coords_raw = data["routes"][0]["geometry"]["coordinates"]
+        return [(c[1], c[0]) for c in coords_raw]
+    except Exception as exc:
+        logger.error("[OSRM] Error en consulta: %s", exc)
+        return None
+
+
+# --------------------------------------------------------------------------
+# Multi-city graph registry
+# --------------------------------------------------------------------------
+CITY_GRAPHS: Dict[str, Any] = {}                     # cache_key → networkx graph
+CITY_GRAPH_BOUNDS: Dict[str, Tuple[float, float, float, float]] = {}  # key → (min_lat, min_lon, max_lat, max_lon)
+_DL_IN_PROGRESS: set = set()                         # keys currently being downloaded
+
+# Keep backward-compat alias (used by app.py preload)
 CITY_GRAPH = None
+
+
+def _register_graph(key: str, G) -> None:
+    """Registra un grafo en el registro global y precomputa su bounding box."""
+    global CITY_GRAPHS, CITY_GRAPH_BOUNDS
+    lats = [d['y'] for _, d in G.nodes(data=True)]
+    lons = [d['x'] for _, d in G.nodes(data=True)]
+    if not lats:
+        return
+    pad = 0.02  # ~2 km padding
+    with GRAPH_LOCK:
+        CITY_GRAPHS[key] = G
+        CITY_GRAPH_BOUNDS[key] = (
+            min(lats) - pad, min(lons) - pad,
+            max(lats) + pad, max(lons) + pad,
+        )
+    logger.info(f"[GRAPH] Grafo '{key}' registrado con {G.number_of_nodes()} nodos.")
+
+
+def get_graph_covering(orig_lat: float, orig_lon: float,
+                       dest_lat: float, dest_lon: float):
+    """
+    Devuelve el primer grafo registrado cuyo bounding box contenga AMBOS puntos.
+    Devuelve None si ninguno cubre ambos extremos.
+    """
+    for key, (min_lat, min_lon, max_lat, max_lon) in CITY_GRAPH_BOUNDS.items():
+        orig_in = (min_lat <= orig_lat <= max_lat) and (min_lon <= orig_lon <= max_lon)
+        dest_in = (min_lat <= dest_lat <= max_lat) and (min_lon <= dest_lon <= max_lon)
+        if orig_in and dest_in:
+            return CITY_GRAPHS.get(key)
+    return None
+
+
+def ensure_graph_for_area(center_lat: float, center_lon: float,
+                           radius_m: int, cache_key: str) -> None:
+    """
+    Asegura que existe un grafo viario para el área indicada.
+    Si no está en memoria, lo carga desde disco (cache/) o lo descarga con OSMnx
+    en un hilo daemon para no bloquear el servidor.
+
+    Args:
+        center_lat:  Latitud del centro del área
+        center_lon:  Longitud del centro del área
+        radius_m:    Radio en metros a cubrir
+        cache_key:   Clave única de identificación del grafo (nombre de preset)
+    """
+    import os
+
+    with GRAPH_LOCK:
+        if cache_key in CITY_GRAPHS:
+            return
+        if cache_key in _DL_IN_PROGRESS:
+            return
+        _DL_IN_PROGRESS.add(cache_key)
+
+    def _download():
+        global CITY_GRAPH
+        try:
+            os.makedirs("cache", exist_ok=True)
+            # Compatibilidad hacia atrás: Madrid puede estar en la raíz del proyecto
+            legacy_path = "madrid_sim_graph.graphml"
+            cache_path = os.path.join("cache", f"graph_{cache_key}.graphml")
+
+            G = None
+            if cache_key == "madrid" and os.path.exists(legacy_path):
+                logger.info(f"[GRAPH] Cargando grafo '{cache_key}' desde {legacy_path}...")
+                G = ox.load_graphml(legacy_path)
+            elif os.path.exists(cache_path):
+                logger.info(f"[GRAPH] Cargando grafo '{cache_key}' desde caché local...")
+                G = ox.load_graphml(cache_path)
+            else:
+                logger.info(
+                    f"[GRAPH] Descargando red viaria para '{cache_key}' "
+                    f"({center_lat:.4f},{center_lon:.4f}) r={radius_m}m ..."
+                )
+                raw = ox.graph_from_point(
+                    (center_lat, center_lon), dist=radius_m, network_type='drive'
+                )
+                scc = max(nx.strongly_connected_components(raw), key=len)
+                G = raw.subgraph(scc).copy()
+                ox.save_graphml(G, cache_path)
+                logger.info(f"[GRAPH] Grafo '{cache_key}' guardado en {cache_path}.")
+
+            _register_graph(cache_key, G)
+            # Actualizar alias backward-compat para Madrid
+            if cache_key == "madrid":
+                CITY_GRAPH = G
+        except Exception as exc:
+            logger.error(f"[GRAPH] Error descargando grafo '{cache_key}': {exc}")
+        finally:
+            _DL_IN_PROGRESS.discard(cache_key)
+
+    t = threading.Thread(target=_download, daemon=True, name=f"GraphDL-{cache_key}")
+    t.start()
+
 
 def get_city_graph():
     """
-    Obtiene el grafo de la ciudad, cargándolo desde disco o descargándolo si es necesario.
-    
-    Returns:
-        networkx.MultiDiGraph: Grafo de calles de la ciudad
+    Backward-compatible: devuelve el grafo de Madrid (lo descarga si es necesario).
+    Bloquea hasta que el grafo esté disponible (máx. 60 s).
     """
-    global CITY_GRAPH
-    if CITY_GRAPH is None:
-        with GRAPH_LOCK:
-            if CITY_GRAPH is None:
-                import os
-                graph_path = "madrid_sim_graph.graphml"
-                if os.path.exists(graph_path):
-                    logger.info("Cargando red viaria local desde disco...")
-                    CITY_GRAPH = ox.load_graphml(graph_path)
-                    logger.info("Grafo físico cargado exitosamente.")
-                else:
-                    logger.info("Descargando red viaria de Madrid (Puede tardar la primera vez)...")
-                    # 5km covers the inner tactical city rapidly.
-                    raw_graph = ox.graph_from_point((40.4168, -3.7038), dist=5000, network_type='drive')
-                    # Guarantee purely contiguous network mathematically
-                    largest_scc = max(nx.strongly_connected_components(raw_graph), key=len)
-                    CITY_GRAPH = raw_graph.subgraph(largest_scc).copy()
-                    
-                    ox.save_graphml(CITY_GRAPH, graph_path)
-                    logger.info("Grafo guardado en disco y cargado.")
-    return CITY_GRAPH
+    ensure_graph_for_area(40.4168, -3.7038, 8000, "madrid")
+    # Esperar hasta que esté disponible (para el preload inicial)
+    for _ in range(600):
+        if "madrid" in CITY_GRAPHS:
+            return CITY_GRAPHS["madrid"]
+        time.sleep(0.1)
+    return CITY_GRAPHS.get("madrid")
 
 class LogisticsEngine:
     """
@@ -209,9 +372,70 @@ class LogisticsEngine:
             self.routes_calculated += 1
             return True
 
-        # Calcular nueva ruta
+        # ── Motor primario: OSRM (Docker local, puerto 5001) ─────────────────
+        if _is_osrm_available():
+            osrm_coords = _route_via_osrm(self.lat, self.lon, lat, lon)
+            if osrm_coords:
+                direct_distance = self._calculate_distance(self.lat, self.lon, lat, lon)
+                osrm_km = sum(
+                    self._calculate_distance(
+                        osrm_coords[i][0], osrm_coords[i][1],
+                        osrm_coords[i + 1][0], osrm_coords[i + 1][1],
+                    )
+                    for i in range(len(osrm_coords) - 1)
+                ) if len(osrm_coords) > 1 else direct_distance
+                if direct_distance > 0 and osrm_km > 0:
+                    self.route_efficiency = min(1.0, max(0.1, direct_distance / osrm_km))
+                self.route_geometry = osrm_coords
+                ROUTE_CACHE[cache_key] = self.route_geometry.copy()
+                logger.info(
+                    "[OSRM] Ruta a %s: %d puntos, eficiencia %.2f",
+                    dest_type, len(osrm_coords), self.route_efficiency,
+                )
+                self.routes_calculated += 1
+                return True
+            # OSRM activo pero sin ruta para este par orig→dest
+            logger.warning(
+                "[OSRM] Sin ruta (%s,%s)→(%s,%s) — fallback a OSMnx",
+                self.lat, self.lon, lat, lon,
+            )
+
+        # ── Fallback: OSMnx (grafo pre-descargado o descarga automática) ─────
         try:
-            G = get_city_graph()
+            # Buscar un grafo que cubra tanto origen como destino
+            G = get_graph_covering(self.lat, self.lon, lat, lon)
+
+            if G is None:
+                # Ningún grafo cubre esta zona todavía.
+                # Disparar descarga en background usando el hospital más cercano como centro.
+                hospitals = [p for p in POIS if p.get("type") == "HOSPITAL"]
+                if hospitals:
+                    # Encontrar hospital más cercano al destino para centrar la descarga
+                    nearest = min(
+                        hospitals,
+                        key=lambda h: self._calculate_distance(lat, lon, h["lat"], h["lon"])
+                    )
+                    c_lat, c_lon = nearest["lat"], nearest["lon"]
+                else:
+                    c_lat, c_lon = (self.lat + lat) / 2, (self.lon + lon) / 2
+
+                # Radio dinámico basado en la distancia orig→dest (mín 6 km)
+                dist_km = self._calculate_distance(self.lat, self.lon, lat, lon)
+                radius_m = max(6000, int((dist_km + 4.0) * 1000))
+
+                # Generar una clave basada en la posición redondeada del centro
+                auto_key = f"auto_{round(c_lat, 2)}_{round(c_lon, 2)}"
+                ensure_graph_for_area(c_lat, c_lon, radius_m, auto_key)
+
+                # Usar ruta directa mientras se descarga
+                self.route_geometry = [(lat, lon)]
+                self.routes_calculated += 1
+                logger.info(
+                    f"Ruta directa a {dest_type} "
+                    f"(descargando red viaria en background para '{auto_key}')"
+                )
+                return True
+
             orig_node = ox.distance.nearest_nodes(G, self.lon, self.lat)
             dest_node = ox.distance.nearest_nodes(G, lon, lat)
             

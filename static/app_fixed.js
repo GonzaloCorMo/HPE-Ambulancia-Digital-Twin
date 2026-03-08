@@ -773,19 +773,19 @@ function updateFleetUI() {
                 </div>
             `;
             
-            // Modal hooking
+            // Modal hooking: open full telemetry modal on card/title click
             const titleEl = card.querySelector('.title-tag');
             if (titleEl) {
                 titleEl.addEventListener('click', (e) => {
                     e.preventDefault();
-                    openAmbulanceDetails(amId);
+                    openTelemetryModal(amId);
                 });
             }
             
-            // Card click for quick actions
+            // Card click for full telemetry
             card.addEventListener('click', (e) => {
                 if (!e.target.closest('.title-tag')) {
-                    openAmbulanceDetails(amId);
+                    openTelemetryModal(amId);
                 }
             });
             
@@ -1001,16 +1001,17 @@ if (btnClear) {
 const btnAutoSim = document.getElementById('btn-auto-sim');
 if (btnAutoSim) {
     btnAutoSim.addEventListener('click', () => {
-        if (!confirm('¿Iniciar simulación autónoma de Madrid?\n\nSe desplegarán:\n• 3 hospitales reales (La Paz, Gregorio Marañón, 12 de Octubre)\n• 2 gasolineras estratégicas\n• 4 ambulancias operativas\n\nSe generarán emergencias automáticas cada 20-30 s\ny anomalías IA cada 2 min.')) return;
+        if (!confirm('¿Iniciar simulación autónoma?\n\nSe generarán emergencias y atascos de forma automática.\nRequiere que haya un preset cargado con hospitales y ambulancias.\n\nSi no has cargado un escenario, selecciona un preset primero.')) return;
         btnAutoSim.disabled = true;
         btnAutoSim.textContent = '⏳ Iniciando...';
         addTerminalLog('[AUTO-SIM] Solicitando simulación autónoma al servidor...');
         postJson('/api/auto_simulation', {})
             .then(data => {
                 if (data.status === 'started') {
-                    addTerminalLog('[AUTO-SIM] 🤖 Simulación autónoma de Madrid iniciada.');
+                    addTerminalLog('[AUTO-SIM] 🤖 Simulación autónoma iniciada.');
                     if (data.message) addTerminalLog(`[AUTO-SIM] ${data.message}`);
-                    if (data.ambulances) addTerminalLog(`[AUTO-SIM] ${data.ambulances} ambulancias desplegadas.`);
+                } else if (data.status === 'error') {
+                    addTerminalLog(`[AUTO-SIM] ⚠️ ${data.message}`);
                 }
             })
             .catch(e => {
@@ -1019,6 +1020,35 @@ if (btnAutoSim) {
             .finally(() => {
                 btnAutoSim.disabled = false;
                 btnAutoSim.innerHTML = '<i class="fas fa-robot"></i><span>🤖 SIMULACIÓN AUTÓNOMA</span>';
+            });
+    });
+}
+
+// Preset loader
+const btnLoadPreset = document.getElementById('btn-load-preset');
+const presetSelector = document.getElementById('preset-selector');
+if (btnLoadPreset && presetSelector) {
+    btnLoadPreset.addEventListener('click', () => {
+        const presetName = presetSelector.value;
+        if (!presetName) {
+            addTerminalLog('[SISTEMA] Selecciona un preset del desplegable.');
+            return;
+        }
+        if (!confirm(`¿Cargar preset "${presetName}"?\n\nSe limpiará el escenario actual y se cargará la infraestructura del preset.`)) return;
+        btnLoadPreset.disabled = true;
+        addTerminalLog(`[PRESET] Cargando preset "${presetName}"...`);
+        postJson('/api/preset', { name: presetName })
+            .then(data => {
+                if (data.status === 'loaded') {
+                    addTerminalLog(`[PRESET] ✅ ${data.message}`);
+                    if (data.ambulances) addTerminalLog(`[PRESET] ${data.ambulances} ambulancias desplegadas.`);
+                }
+            })
+            .catch(e => {
+                addTerminalLog(`[ERROR] No se pudo cargar el preset: ${e.message}`);
+            })
+            .finally(() => {
+                btnLoadPreset.disabled = false;
             });
     });
 }
@@ -1293,6 +1323,201 @@ document.getElementById('ambulance-modal')?.addEventListener('click', (e) => {
     if (e.target.id === 'ambulance-modal') {
         closeAmbulanceModal();
     }
+});
+
+// -------------------------------------------------------------
+// Telemetry Modal - Visualización detallada de telemetría
+// -------------------------------------------------------------
+let currentTelemetryAmbId = null;
+let _telemetryRefreshInterval = null;
+
+const telemetryModal = document.getElementById('telemetry-modal');
+
+function openTelemetryModal(ambulanceId) {
+    if (!ambulanceId || !simState.ambulances[ambulanceId]) {
+        addTerminalLog(`[ERROR] Ambulancia ${ambulanceId} no encontrada`);
+        return;
+    }
+    currentTelemetryAmbId = ambulanceId;
+    const titleEl = document.getElementById('modal-title');
+    if (titleEl) titleEl.textContent = `Telemetría – ${ambulanceId}`;
+
+    _refreshTelemetryModal();
+
+    telemetryModal.classList.remove('hidden');
+    telemetryModal.classList.add('flex');
+
+    if (_telemetryRefreshInterval) clearInterval(_telemetryRefreshInterval);
+    _telemetryRefreshInterval = setInterval(() => {
+        if (currentTelemetryAmbId && simState.ambulances[currentTelemetryAmbId]) {
+            _refreshTelemetryModal();
+        }
+    }, 500);
+}
+
+function closeTelemetryModal() {
+    telemetryModal.classList.add('hidden');
+    telemetryModal.classList.remove('flex');
+    if (_telemetryRefreshInterval) {
+        clearInterval(_telemetryRefreshInterval);
+        _telemetryRefreshInterval = null;
+    }
+    currentTelemetryAmbId = null;
+}
+
+function _refreshTelemetryModal() {
+    if (!currentTelemetryAmbId) return;
+    const amb = simState.ambulances[currentTelemetryAmbId];
+    if (!amb) return;
+    const v = amb.vitals || {};
+    const m = amb.mechanical || {};
+    const l = amb.logistics || {};
+
+    // --- Constantes Vitales ---
+    const hr = v.heart_rate || 0;
+    const elHr = document.getElementById('modal-heart-rate');
+    if (elHr) elHr.textContent = (v.has_patient && hr > 0) ? hr : '--';
+    const elHrT = document.getElementById('modal-heart-rate-trend');
+    if (elHrT) elHrT.textContent = (v.has_patient && hr > 0) ? `${hr} BPM` : '-- BPM';
+
+    const bp = v.blood_pressure || '0/0';
+    const elBp = document.getElementById('modal-blood-pressure');
+    if (elBp) elBp.textContent = v.has_patient ? bp : '--/--';
+    const elMap = document.getElementById('modal-map');
+    if (elMap) elMap.textContent = v.has_patient ? `MAP: ${v.mean_arterial_pressure ?? '--'} mmHg` : 'MAP: -- mmHg';
+
+    const spo2 = v.oxygen_level ?? 0;
+    const elO2 = document.getElementById('modal-oxygen');
+    if (elO2) elO2.textContent = v.has_patient ? `${spo2}%` : '--%';
+
+    const bodyTemp = v.body_temperature ?? 0;
+    const elTemp = document.getElementById('modal-temperature');
+    if (elTemp) elTemp.textContent = v.has_patient ? `${bodyTemp}°C` : '--°C';
+
+    // Estado paciente badge
+    const psEl = document.getElementById('modal-patient-status');
+    if (psEl) {
+        const ps = v.patient_status || 'NONE';
+        const psColors = {
+            'STABLE':   'bg-emerald-100 text-emerald-700',
+            'CRITICAL': 'bg-red-100 text-red-700',
+            'INJURED':  'bg-amber-100 text-amber-700',
+            'DECEASED': 'bg-slate-200 text-slate-600',
+            'NONE':     'bg-slate-100 text-slate-500'
+        };
+        psEl.textContent = v.has_patient ? ps : 'SIN PACIENTE';
+        psEl.className = `px-3 py-1 rounded-full text-xs font-bold ${psColors[ps] || psColors['NONE']}`;
+    }
+
+    const elEcg = document.getElementById('modal-ecg');
+    if (elEcg) elEcg.textContent = v.has_patient ? (v.ecg_rhythm || '--') : '--';
+    const elGcs = document.getElementById('modal-gcs');
+    if (elGcs) elGcs.textContent = v.has_patient ? (v.glasgow_coma_scale ?? '--') : '--';
+    const elPain = document.getElementById('modal-pain');
+    if (elPain) elPain.textContent = v.has_patient ? (v.pain_level ?? '--') : '--';
+
+    // --- Estado Mecánico ---
+    const fuel = m.fuel_level ?? 0;
+    const elFuelPct = document.getElementById('modal-fuel-percent');
+    if (elFuelPct) elFuelPct.textContent = `${fuel.toFixed(1)}%`;
+    const elFuelBar = document.getElementById('modal-fuel-bar');
+    if (elFuelBar) {
+        elFuelBar.style.width = `${Math.max(0, Math.min(100, fuel))}%`;
+        elFuelBar.className = `h-2.5 rounded-full ${fuel < 20 ? 'bg-red-500' : fuel < 40 ? 'bg-amber-400' : 'bg-amber-500'}`;
+    }
+    const elFuelDist = document.getElementById('modal-fuel-distance');
+    if (elFuelDist) elFuelDist.textContent = `Distancia restante: ~${Math.round((fuel / 100) * 600)} km`;
+
+    const battery = m.battery_level ?? 0;
+    const elBatPct = document.getElementById('modal-battery-percent');
+    if (elBatPct) elBatPct.textContent = `${battery.toFixed(1)}%`;
+    const elBatBar = document.getElementById('modal-battery-bar');
+    if (elBatBar) {
+        elBatBar.style.width = `${Math.max(0, Math.min(100, battery))}%`;
+        elBatBar.className = `h-2.5 rounded-full ${battery < 20 ? 'bg-red-500' : 'bg-emerald-500'}`;
+    }
+    const elVolt = document.getElementById('modal-battery-voltage');
+    if (elVolt) elVolt.textContent = `Voltaje: ${(m.alternator_voltage ?? 0).toFixed(1)} V`;
+
+    // Neumáticos
+    const tires = m.tire_pressure || [0, 0, 0, 0];
+    ['modal-tire-fl','modal-tire-fr','modal-tire-rl','modal-tire-rr'].forEach((id, i) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const psi = tires[i] ?? 0;
+        el.textContent = psi.toFixed(1);
+        el.className = `text-xl font-bold ${
+            psi < 25 ? 'text-red-600' : psi < 30 ? 'text-amber-500' : 'text-slate-800'
+        }`;
+    });
+
+    // Temperatura motor
+    const engT = m.engine_temperature ?? 0;
+    const elEngT = document.getElementById('modal-engine-temp');
+    if (elEngT) elEngT.textContent = engT.toFixed(1);
+    const elEngTs = document.getElementById('modal-engine-temp-status');
+    if (elEngTs) {
+        elEngTs.textContent = engT > 110 ? '⚠️ Sobrecalentamiento' : engT > 100 ? 'Caliente' : 'Normal';
+        elEngTs.className = `text-xs ${ engT > 110 ? 'text-red-500' : engT > 100 ? 'text-amber-500' : 'text-red-500' }`;
+    }
+
+    // Temperatura transmisión
+    const transT = m.transmission_temperature ?? 0;
+    const elTransT = document.getElementById('modal-trans-temp');
+    if (elTransT) elTransT.textContent = transT.toFixed(1);
+    const elTransTs = document.getElementById('modal-trans-temp-status');
+    if (elTransTs) {
+        elTransTs.textContent = transT > 110 ? '⚠️ Alta' : 'Normal';
+        elTransTs.className = `text-xs ${ transT > 110 ? 'text-red-500' : 'text-blue-500' }`;
+    }
+
+    // JSON raw data
+    const elJson = document.getElementById('modal-json');
+    if (elJson) {
+        elJson.textContent = JSON.stringify({ vitals: v, mechanical: m, logistics: l }, null, 2);
+    }
+}
+
+// Cerrar telemetry modal
+document.getElementById('btn-close-modal')?.addEventListener('click', closeTelemetryModal);
+telemetryModal?.addEventListener('click', (e) => {
+    if (e.target === telemetryModal) closeTelemetryModal();
+});
+
+// Botones de tratamiento
+telemetryModal?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.modal-treatment-btn');
+    if (btn && currentTelemetryAmbId) {
+        const treatment = btn.dataset.treatment;
+        postJson('/api/incident/inject', {
+            ambulance_id: currentTelemetryAmbId,
+            category: 'vitals',
+            incident_type: treatment
+        }).then(() => addTerminalLog(`[TRATAMIENTO] ${treatment} aplicado a ${currentTelemetryAmbId}`));
+    }
+
+    const incBtn = e.target.closest('.modal-incident-btn');
+    if (incBtn && currentTelemetryAmbId) {
+        const category = incBtn.dataset.category;
+        const incident = incBtn.dataset.incident;
+        postJson('/api/incident/inject', {
+            ambulance_id: currentTelemetryAmbId,
+            category,
+            incident_type: incident
+        }).then(() => addTerminalLog(`[INCIDENTE] ${incident} inyectado en ${currentTelemetryAmbId}`));
+    }
+});
+
+// Botones de mantenimiento
+document.getElementById('modal-refuel-btn')?.addEventListener('click', () => {
+    if (!currentTelemetryAmbId) return;
+    postJson('/api/ambulance/command', { ambulance_id: currentTelemetryAmbId, command: 'refuel' })
+        .then(() => addTerminalLog(`[ACCIÓN] ${currentTelemetryAmbId} enviada a repostar`));
+});
+document.getElementById('modal-maintenance-btn')?.addEventListener('click', () => {
+    if (!currentTelemetryAmbId) return;
+    postJson('/api/ambulance/command', { ambulance_id: currentTelemetryAmbId, command: 'maintenance' })
+        .then(() => addTerminalLog(`[ACCIÓN] ${currentTelemetryAmbId} enviada a mantenimiento`));
 });
 
 // -------------------------------------------------------------
@@ -1592,6 +1817,45 @@ document.addEventListener('DOMContentLoaded', () => {
     // Setup quick actions
     setupQuickActions();
     
+    // Populate preset selector from API
+    fetch('/api/presets')
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(data => {
+            if (!data.presets) return;
+            const sel = document.getElementById('preset-selector');
+            if (!sel) return;
+            // Clear existing options except placeholder
+            sel.innerHTML = '<option value="">-- Seleccionar Preset --</option>';
+            const FLAG_MAP = {
+                madrid: '\uD83C\uDDEA\uD83C\uDDF8',
+                barcelona: '\uD83C\uDDEA\uD83C\uDDF8',
+                sevilla: '\uD83C\uDDEA\uD83C\uDDF8',
+                valencia: '\uD83C\uDDEA\uD83C\uDDF8',
+                cdmx: '\uD83C\uDDF2\uD83C\uDDFD',
+                guadalajara: '\uD83C\uDDF2\uD83C\uDDFD',
+                monterrey: '\uD83C\uDDF2\uD83C\uDDFD',
+                bogota: '\uD83C\uDDE8\uD83C\uDDF4',
+                medellin: '\uD83C\uDDE8\uD83C\uDDF4',
+                cali: '\uD83C\uDDE8\uD83C\uDDF4',
+            };
+            Object.entries(data.presets).forEach(([key, info]) => {
+                const opt = document.createElement('option');
+                opt.value = key;
+                const flag = FLAG_MAP[key] || '\uD83C\uDF0D';
+                opt.textContent = `${flag} ${info.name}`;
+                sel.appendChild(opt);
+            });
+        })
+        .catch(() => {
+            // Fallback: static option for Madrid
+            const sel = document.getElementById('preset-selector');
+            if (sel && sel.options.length <= 1) {
+                const opt = document.createElement('option');
+                opt.value = 'madrid'; opt.textContent = '\uD83C\uDDEA\uD83C\uDDF8 Madrid';
+                sel.appendChild(opt);
+            }
+        });
+
     // Add initial log
     addTerminalLog('[SISTEMA] Centro de Control Digital Twin inicializado');
     addTerminalLog('[SISTEMA] Esperando conexión con servidor...');

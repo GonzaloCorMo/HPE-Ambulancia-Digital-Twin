@@ -172,3 +172,144 @@ class AnomalyPredictor:
 # Singleton global — importar en otros módulos:  from telemetry.ai_predictor import predictor
 # ---------------------------------------------------------------------------
 predictor = AnomalyPredictor()
+
+
+# ===========================================================================
+# RUL Predictor — Vida Útil Restante del motor
+# ===========================================================================
+
+class RULPredictor:
+    """
+    Predictor de Vida Útil Restante (RUL) del motor usando RandomForestRegressor.
+
+    Features de entrada (todas presentes en MechanicalEngine.get_state()):
+      - engine_temperature  (°C)
+      - oil_pressure        (PSI)
+      - engine_hours        (h)   — horas acumuladas de funcionamiento
+
+    Target: horas restantes de vida útil del motor (0 – 120 h).
+    """
+
+    # Umbrales de alerta según documento de diseño
+    _THRESHOLD_CRITICAL  =  8.0   # h
+    _THRESHOLD_ALERT     = 24.0   # h
+    _THRESHOLD_CAUTION   = 72.0   # h
+
+    # Rango máximo de RUL para la generación sintética
+    _MAX_RUL = 120.0
+
+    def __init__(self, n_samples: int = 500):
+        self._model  = None
+        self._scaler = None
+
+        try:
+            import numpy as np
+            from sklearn.ensemble import RandomForestRegressor
+            from sklearn.preprocessing import StandardScaler
+        except ImportError:
+            logger.error(
+                "[RULPredictor] scikit-learn no está instalado. "
+                "Ejecuta: pip install scikit-learn>=1.3.0 — la predicción RUL estará desactivada."
+            )
+            return
+
+        rng = random.Random(0)
+
+        # ── Dataset sintético de degradación ──────────────────────────────
+        # El RUL decrece con las horas de uso, la temperatura elevada y la
+        # presión de aceite baja, con ruido gaussiano para variabilidad.
+        X_list: list = []
+        y_list: list = []
+
+        for _ in range(n_samples):
+            hours   = rng.uniform(0.0,   500.0)
+            temp    = rng.uniform(75.0,  135.0)
+            pressure = rng.uniform(8.0,   58.0)
+
+            rul = (
+                self._MAX_RUL
+                - hours    * 0.22
+                - max(0.0, temp    - 100.0) * 1.5
+                - max(0.0, 35.0    - pressure) * 2.0
+                + rng.gauss(0.0, 3.0)       # ruido gaussiano
+            )
+            rul = max(0.0, min(self._MAX_RUL, rul))
+
+            X_list.append([temp, pressure, hours])
+            y_list.append(rul)
+
+        X = np.array(X_list, dtype=float)
+        y = np.array(y_list, dtype=float)
+
+        self._scaler = StandardScaler()
+        X_scaled = self._scaler.fit_transform(X)
+
+        self._model = RandomForestRegressor(
+            n_estimators=100,
+            random_state=42,
+            n_jobs=-1,
+        )
+        self._model.fit(X_scaled, y)
+
+        logger.info(
+            f"[RULPredictor] RandomForestRegressor entrenado: {n_samples} muestras, "
+            f"features=[engine_temperature, oil_pressure, engine_hours]"
+        )
+
+    # ------------------------------------------------------------------
+    # API pública
+    # ------------------------------------------------------------------
+
+    def predict_rul(self, telemetry_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Predice las horas de vida útil restante del motor.
+
+        Args:
+            telemetry_data: Dict con los campos de MechanicalEngine.get_state().
+
+        Returns:
+            {
+                "hours_remaining": float,  — horas estimadas de vida útil restante
+                "alert_level":     str,    — "NORMAL" | "PRECAUCIÓN" | "ALERTA" | "CRÍTICO"
+            }
+        """
+        if self._model is None:
+            return {"hours_remaining": self._MAX_RUL, "alert_level": "NORMAL"}
+
+        try:
+            import numpy as np
+
+            sample = [
+                float(telemetry_data.get("engine_temperature", 90.0)),
+                float(telemetry_data.get("oil_pressure",       40.0)),
+                float(telemetry_data.get("engine_hours",        0.0)),
+            ]
+
+            X = np.array([sample], dtype=float)
+            X_scaled = self._scaler.transform(X)
+            rul_hours = float(self._model.predict(X_scaled)[0])
+            rul_hours = max(0.0, min(self._MAX_RUL, rul_hours))
+
+            if rul_hours < self._THRESHOLD_CRITICAL:
+                alert_level = "CRÍTICO"
+            elif rul_hours < self._THRESHOLD_ALERT:
+                alert_level = "ALERTA"
+            elif rul_hours < self._THRESHOLD_CAUTION:
+                alert_level = "PRECAUCIÓN"
+            else:
+                alert_level = "NORMAL"
+
+            return {
+                "hours_remaining": round(rul_hours, 1),
+                "alert_level":     alert_level,
+            }
+
+        except Exception as exc:
+            logger.warning(f"[RULPredictor] Error durante predicción: {exc}")
+            return {"hours_remaining": self._MAX_RUL, "alert_level": "NORMAL"}
+
+
+# ---------------------------------------------------------------------------
+# Singleton global — importar con:  from telemetry.ai_predictor import rul_predictor
+# ---------------------------------------------------------------------------
+rul_predictor = RULPredictor()

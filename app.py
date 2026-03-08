@@ -13,7 +13,7 @@ import uvicorn
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from engine import SimulatorEngine
+from engine import SimulatorEngine, SCENARIO_PRESETS
 from telemetry.logistics import POIS, JAMS, add_poi, add_jam, remove_jam
 from telemetry.vitals import PatientStatus
 from telemetry.logistics import MissionStatus
@@ -95,13 +95,13 @@ async def lifespan(app: FastAPI):
     """Gestiona ciclo de vida de la aplicación FastAPI."""
     logger.info("Starting simulator application...")
     
-    # Pre-cargar grafo de la ciudad en background
+    # Pre-cargar grafo de Madrid en background (al arrancar el servidor)
     def preload_graph():
         try:
-            from telemetry.logistics import get_city_graph
-            logger.info("Pre-cargando grafo de la ciudad...")
-            get_city_graph()
-            logger.info("Grafo cargado exitosamente.")
+            from telemetry.logistics import ensure_graph_for_area
+            logger.info("Pre-cargando red viaria de Madrid en background...")
+            ensure_graph_for_area(40.4168, -3.7038, 8000, "madrid")
+            logger.info("Solicitud de precarga de grafo enviada.")
         except Exception as e:
             logger.error(f"Error pre-cargando grafo: {e}")
             engine.log_network(f"[SISTEMA] Aviso: {e}")
@@ -162,13 +162,17 @@ class DeleteRequest(BaseModel):
 
 class SpeedRequest(BaseModel):
     """Modelo para cambio de velocidad."""
-    multiplier: int = Field(..., ge=1, le=20, description="Multiplicador de velocidad (1-20)")
+    multiplier: int = Field(..., ge=1, le=50, description="Multiplicador de velocidad (1-50)")
 
 class NetworkRequest(BaseModel):
     """Modelo para configuración de red."""
     mqtt: bool = Field(True, description="Estado MQTT")
     p2p: bool = Field(True, description="Estado P2P")
     http: bool = Field(True, description="Estado HTTP")
+
+class PresetRequest(BaseModel):
+    """Modelo para carga de preset de escenario."""
+    name: str = Field(..., description="Nombre del preset")
 
 class IncidentRequest(BaseModel):
     """Modelo para inyección de incidentes."""
@@ -901,23 +905,62 @@ async def api_ambulance_command(req: AmbulanceCommandRequest):
         logger.error(f"Error ejecutando comando: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/presets")
+async def api_list_presets():
+    """Lista los presets de escenario disponibles."""
+    return {
+        "presets": {
+            name: {
+                "name": data["name"],
+                "hospitals": len(data["hospitals"]),
+                "gas_stations": len(data["gas_stations"]),
+                "ambulances": len(data["ambulance_positions"]),
+            }
+            for name, data in SCENARIO_PRESETS.items()
+        }
+    }
+
+@app.post("/api/preset", status_code=200)
+async def api_load_preset(req: PresetRequest):
+    """Carga un preset de escenario (hospitales, gasolineras, ambulancias)."""
+    try:
+        available = list(SCENARIO_PRESETS.keys())
+        if req.name not in SCENARIO_PRESETS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Preset '{req.name}' no encontrado. Disponibles: {available}"
+            )
+        success = engine.load_preset(req.name)
+        if success:
+            return {
+                "status": "loaded",
+                "preset": req.name,
+                "message": f"Preset '{req.name}' cargado exitosamente",
+                "ambulances": len(engine.ambulances),
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Error cargando preset")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/auto_simulation", status_code=200)
 async def api_auto_simulation():
     """
-    Inicia el modo de simulacion autonoma completo:
-    carga hospitales y gasolineras reales de Madrid, despliega 4 ambulancias,
-    activa la simulacion y arranca el generador automatico de emergencias + anomalias IA.
+    Inicia la generación automática de eventos (emergencias, atascos, anomalías IA).
+    Requiere hospitales y ambulancias en el mapa.
     """
     try:
-        engine.start_auto_simulation()
+        success, message = engine.start_auto_simulation()
         return {
-            "status": "started",
-            "message": "Simulacion autonoma iniciada. Emergencias cada 20-30s.",
+            "status": "started" if success else "error",
+            "message": message,
             "ambulances": len(engine.ambulances),
             "is_simulating": engine.is_simulating,
         }
     except Exception as e:
-        logger.error(f"Error iniciando simulacion autonoma: {e}")
+        logger.error(f"Error iniciando simulación autónoma: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # 6. WebSocket Event Handlers
