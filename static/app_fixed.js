@@ -395,6 +395,7 @@ const btnPlay = document.getElementById('btn-play');
 const speedLabel = document.getElementById('speed-label');
 const sliderSpeed = document.getElementById('slider-speed');
 const terminalLogs = document.getElementById('terminal-logs');
+let visibleLogCount = 0;
 const connStatus = document.getElementById('connection-status');
 const statsContainer = document.getElementById('stats-container');
 
@@ -507,17 +508,83 @@ setInterval(() => {
     }
 }, 10000);
 
+// ── Signal Monitor filter & render ─────────────────────────────────────────
+const _SIGNAL_NOISE_PATTERNS = [
+    /\] → MQTT \|/,
+    /\] → P2P BROADCAST \|/,
+    /^HTTP POST to https?:\/\//,
+    /^HTTP POST https?:\/\/.*\s2\d\d/,
+    /\[HTTPS\] Backup sync/,
+    /\] → HTTP \| Backup/,
+];
+
+const _SIGNAL_CATEGORIES = [
+    { pattern: /\[URGENCIA|🚨/,                           label: 'URGENCIA',  bg: '#dc2626', fg: '#ffffff' },
+    { pattern: /\[ERROR\]/,                              label: 'ERROR',     bg: '#ef4444', fg: '#ffffff' },
+    { pattern: /⚠️|ADVERTENCIA|\[MQTT\].*[Dd]esconex/,   label: 'AVISO',     bg: '#d97706', fg: '#ffffff' },
+    { pattern: /\[AUTO-SIM\]/,                           label: 'AUTO-SIM',  bg: '#7c3aed', fg: '#ffffff' },
+    { pattern: /\[CONTROL\]/,                            label: 'CONTROL',   bg: '#2563eb', fg: '#ffffff' },
+    { pattern: /\[MAPA\]/,                               label: 'MAPA',      bg: '#0d9488', fg: '#ffffff' },
+    { pattern: /\[SISTEMA\]|\[API\]|\[SERVER\]/,         label: 'SISTEMA',   bg: '#475569', fg: '#e2e8f0' },
+];
+
 function addTerminalLog(message) {
     if (!terminalLogs) return;
-    
-    const t = formatTime(new Date());
-    terminalLogs.textContent += `[${t}] ${message}\n`;
-    terminalLogs.scrollTop = terminalLogs.scrollHeight;
 
-    // Prevent giant memory consumption
-    if (terminalLogs.textContent.length > 10000) {
-        terminalLogs.textContent = terminalLogs.textContent.substring(5000);
+    // Discard noisy repetitive messages
+    for (const re of _SIGNAL_NOISE_PATTERNS) {
+        if (re.test(message)) return;
     }
+
+    // Clear initial placeholder HTML on first real entry
+    if (visibleLogCount === 0) {
+        terminalLogs.innerHTML = '';
+    }
+
+    // Determine category
+    let label = 'INFO';
+    let bg    = '#059669';
+    let fg    = '#ffffff';
+    for (const cat of _SIGNAL_CATEGORIES) {
+        if (cat.pattern.test(message)) {
+            label = cat.label; bg = cat.bg; fg = cat.fg;
+            break;
+        }
+    }
+
+    // Build DOM entry (textContent only — XSS-safe)
+    const entry = document.createElement('div');
+    entry.style.cssText = 'display:flex;align-items:baseline;gap:6px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.04);';
+
+    const timeSpan = document.createElement('span');
+    timeSpan.style.cssText = 'flex-shrink:0;color:#94a3b8;font-size:10px;';
+    timeSpan.textContent = formatTime(new Date());
+
+    const badge = document.createElement('span');
+    badge.style.cssText = `flex-shrink:0;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:${bg};color:${fg};text-transform:uppercase;letter-spacing:.4px;`;
+    badge.textContent = label;
+
+    const msgSpan = document.createElement('span');
+    msgSpan.style.cssText = 'flex:1;color:#d1fae5;word-break:break-word;';
+    msgSpan.textContent = message;
+
+    entry.appendChild(timeSpan);
+    entry.appendChild(badge);
+    entry.appendChild(msgSpan);
+    terminalLogs.appendChild(entry);
+
+    // Cap at 200 entries
+    visibleLogCount++;
+    if (visibleLogCount > 200) {
+        terminalLogs.removeChild(terminalLogs.firstChild);
+        visibleLogCount--;
+    }
+
+    // Update count badge
+    const countEl = document.getElementById('log-count');
+    if (countEl) countEl.textContent = visibleLogCount;
+
+    terminalLogs.scrollTop = terminalLogs.scrollHeight;
 }
 
 function updateAllStats(state) {
@@ -988,6 +1055,16 @@ if (btnPlay) {
     });
 }
 
+const btnClearLogs = document.getElementById('btn-clear-logs');
+if (btnClearLogs) {
+    btnClearLogs.addEventListener('click', () => {
+        if (terminalLogs) terminalLogs.innerHTML = '';
+        visibleLogCount = 0;
+        const countEl = document.getElementById('log-count');
+        if (countEl) countEl.textContent = '0';
+    });
+}
+
 const btnClear = document.getElementById('btn-clear');
 if (btnClear) {
     btnClear.addEventListener('click', () => { 
@@ -1091,11 +1168,27 @@ if (sliderSeverity) {
         const mult = sliderToSeverity(parseInt(e.target.value));
         if (severityLabel) severityLabel.textContent = `${mult.toFixed(1)}x`;
         postJson('/api/control/severity', { multiplier: mult })
-            .then(() => addTerminalLog(`[CONTROL] Severidad de eventos ajustada a ${mult.toFixed(1)}x`));
+            .then(() => addTerminalLog(`[CONTROL] Frecuencia de eventos ajustada a ${mult.toFixed(1)}x`));
     });
     // Set initial label
     const initMult = sliderToSeverity(parseInt(sliderSeverity.value));
     if (severityLabel) severityLabel.textContent = `${initMult.toFixed(1)}x`;
+}
+
+// Fault frequency slider
+const sliderFaultFreq = document.getElementById('slider-fault-freq');
+const faultFreqLabel = document.getElementById('fault-freq-label');
+if (sliderFaultFreq) {
+    function sliderToFaultFreq(v) { return Math.round(v / 10 * 10) / 10; }
+    sliderFaultFreq.addEventListener('input', (e) => {
+        const mult = sliderToFaultFreq(parseInt(e.target.value));
+        if (faultFreqLabel) faultFreqLabel.textContent = `${mult.toFixed(1)}x`;
+        postJson('/api/control/fault_frequency', { multiplier: mult })
+            .then(() => addTerminalLog(`[CONTROL] Frecuencia de averías ajustada a ${mult.toFixed(1)}x`));
+    });
+    // Set initial label
+    const initFault = sliderToFaultFreq(parseInt(sliderFaultFreq.value));
+    if (faultFreqLabel) faultFreqLabel.textContent = `${initFault.toFixed(1)}x`;
 }
 
 // Network toggles

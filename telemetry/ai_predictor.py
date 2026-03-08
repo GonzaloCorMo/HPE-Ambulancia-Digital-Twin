@@ -34,8 +34,12 @@ class AnomalyPredictor:
     ]
 
     # Rangos de operación NORMAL para generar el dataset sintético
+    # NOTA: engine_temperature llega hasta 115°C en operación normal (min(115.0,...) en mechanical.py).
+    # El rango de entrenamiento se extiende ligeramente más allá del máximo operacional para que
+    # IsolationForest no trate los valores de frontera (115°C) como outliers por estar en el borde
+    # de la distribución uniforme de entrenamiento.
     _NORMAL_RANGES = [
-        (85.0, 105.0),   # engine_temperature
+        (83.0, 118.0),   # engine_temperature — rango ligeramente mayor que el cap operacional (115°C)
         (30.0, 50.0),    # oil_pressure
         (20.0, 100.0),   # fuel_level  (cualquier nivel operacional válido)
         (70.0, 100.0),   # coolant_level
@@ -75,6 +79,20 @@ class AnomalyPredictor:
                 for low, high in self._NORMAL_RANGES
             ]
             data.append(sample)
+
+        # Ambulancias recién desplegadas o recién mantenidas: todos los valores
+        # cerca de su máximo/óptimo. Sin estos ejemplos, IsolationForest aísla
+        # las equinas de alta dimensión (fuel=100%, coolant=100%, etc.) como
+        # outliers aunque sea el estado inicial perfectamente normal.
+        for _ in range(150):
+            data.append([
+                rng.uniform(88.0, 100.0),   # engine_temperature (arranque / ralentí)
+                rng.uniform(38.0, 50.0),    # oil_pressure (fresco, alta presión)
+                rng.uniform(90.0, 100.0),   # fuel_level (tanque lleno)
+                rng.uniform(92.0, 100.0),   # coolant_level (fresco)
+                rng.uniform(95.0, 100.0),   # battery_level (cargada)
+                rng.uniform(0.0, 8.0),      # brake_wear (frenos nuevos)
+            ])
 
         X = np.array(data, dtype=float)
         self._scaler = StandardScaler()

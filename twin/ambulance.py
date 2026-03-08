@@ -368,7 +368,14 @@ class AmbulanceTwin:
         try:
             if hasattr(self.mechanical, 'perform_maintenance'):
                 self.mechanical.perform_maintenance()
-                self.log_callback(f"[{self.id}] 🔧 Mantenimiento completo realizado")
+                # Restaurar estado operativo completo (incluyendo posibles averías)
+                self.mechanical.broken = False
+                self.mechanical.engine_on = True
+                self.logistics.mission_status = "ACTIVE"
+                self.logistics.action_message = "Mantenimiento completado — Unidad operativa"
+                self.log_callback(
+                    f"[{self.id}] ✅ Mantenimiento completo realizado. Unidad restaurada al servicio."
+                )
                 return True
             return False
         except Exception as e:

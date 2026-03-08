@@ -183,6 +183,10 @@ class SeverityRequest(BaseModel):
     """Modelo para ajuste de severidad de eventos autónomos."""
     multiplier: float = Field(..., ge=0.1, le=10.0, description="Multiplicador de frecuencia de eventos (0.1-10)")
 
+class FaultFrequencyRequest(BaseModel):
+    """Modelo para ajuste de frecuencia de inyección de fallos mecánicos."""
+    multiplier: float = Field(..., ge=0.1, le=10.0, description="Multiplicador de frecuencia de averías (0.1-10)")
+
 class IncidentRequest(BaseModel):
     """Modelo para inyección de incidentes."""
     ambulance_id: str = Field(..., description="ID de ambulancia")
@@ -1010,6 +1014,19 @@ async def api_set_severity(req: SeverityRequest):
             "status": "updated",
             "multiplier": req.multiplier,
             "message": f"Frecuencia de eventos ajustada a {req.multiplier:.1f}x"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/control/fault_frequency", status_code=200)
+async def api_set_fault_frequency(req: FaultFrequencyRequest):
+    """Ajusta el multiplicador de frecuencia de inyección de fallos mecánicos."""
+    try:
+        engine.set_fault_frequency(req.multiplier)
+        return {
+            "status": "updated",
+            "multiplier": req.multiplier,
+            "message": f"Frecuencia de averías ajustada a {req.multiplier:.1f}x"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -9,6 +9,7 @@ from main import launch_ambulance
 from telemetry.logistics import (
     POIS, JAMS, MissionStatus, add_poi, add_jam, remove_jam
 )
+from telemetry.vitals import PatientStatus
 
 # Distancia maxima operativa: asignaciones mas largas son rechazadas automaticamente
 MAX_OPERATIONAL_DISTANCE_KM = 150.0
@@ -208,6 +209,7 @@ class SimulatorEngine:
         
         self.speed_multiplier = 1
         self.event_severity = 1.0  # Multiplier for auto-sim event frequency (0.2–5.0)
+        self.fault_frequency = 1.0  # Multiplier for mechanical fault injection rate (0.1–10.0)
         self.mqtt_on = True
         self.p2p_on = True
         self.http_on = True
@@ -222,6 +224,9 @@ class SimulatorEngine:
         # Flags de simulación autónoma
         self._auto_sim_active: bool = False
         self._auto_jam_active: bool = False
+        self._rul_monitor_active: bool = False
+        self._rul_warned: set = set()  # Ambulance IDs that have received ALERTA log (avoid spam)
+        self._repair_timers: Dict[str, float] = {}  # amb_id → timestamp when repair started
         
         # Iniciar hilo de despacho
         self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True)
@@ -368,6 +373,10 @@ class SimulatorEngine:
         Returns:
             True si está disponible
         """
+        # Verificar avería — nunca asignar una ambulancia averiada
+        if getattr(ambulance.mechanical, 'broken', False):
+            return False
+
         # Verificar estado de misión
         mission_status = getattr(ambulance.logistics, 'mission_status', None)
         if mission_status not in [MissionStatus.ACTIVE.value, MissionStatus.INACTIVE.value]:
@@ -612,7 +621,7 @@ class SimulatorEngine:
             # Configurar paciente en ambulancia
             if hasattr(ambulance.vitals, 'set_patient_info'):
                 ambulance.vitals.set_patient_info(age=45, has_patient=True)
-                ambulance.vitals.patient_status = "CRITICAL"
+                ambulance.vitals.patient_status = PatientStatus.CRITICAL
             
             # Asignar hospital destino
             hospital = emergency.get("hospital_assigned")
@@ -1029,7 +1038,12 @@ class SimulatorEngine:
     def set_event_severity(self, multiplier: float) -> None:
         """Ajusta el multiplicador de frecuencia de eventos autónomos (0.2–5.0)."""
         self.event_severity = max(0.1, min(10.0, float(multiplier)))
-        self.log_network(f"[AUTO-SIM] Severidad de eventos ajustada a {self.event_severity:.1f}x")
+        self.log_network(f"[AUTO-SIM] Frecuencia de eventos ajustada a {self.event_severity:.1f}x")
+
+    def set_fault_frequency(self, multiplier: float) -> None:
+        """Ajusta el multiplicador de frecuencia de inyección de fallos mecánicos (0.1–10.0)."""
+        self.fault_frequency = max(0.1, min(10.0, float(multiplier)))
+        self.log_network(f"[AUTO-SIM] Frecuencia de averías ajustada a {self.fault_frequency:.1f}x")
 
     def load_preset(self, preset_name: str) -> bool:
         """
@@ -1149,6 +1163,14 @@ class SimulatorEngine:
         )
         self._auto_jam_thread.start()
 
+        # Hilo monitor de RUL y averías
+        self._rul_monitor_active = True
+        self._rul_warned = set()
+        self._rul_monitor_thread = threading.Thread(
+            target=self._rul_monitor_loop, daemon=True, name="RULMonitorThread"
+        )
+        self._rul_monitor_thread.start()
+
         msg = "Simulación autónoma activa. Emergencias y atascos se generarán automáticamente."
         self.log_network(f"[AUTO-SIM] ✅ {msg}")
         return True, msg
@@ -1157,13 +1179,14 @@ class SimulatorEngine:
         """Detiene la generación automática de eventos."""
         self._auto_sim_active = False
         self._auto_jam_active = False
+        self._rul_monitor_active = False
         self.log_network("[AUTO-SIM] Generación automática de eventos detenida.")
 
     def _auto_emergency_loop(self) -> None:
         """Genera emergencias aleatorias cerca de hospitales e inyecta anomalías IA."""
         last_anomaly_injection = time.time()
         ANOMALY_INTERVAL = 120.0
-        FAULT_TYPES = ["overheating", "low_oil", "brake_failure", "battery_drain"]
+        FAULT_TYPES = ["overheating", "low_oil", "brake_failure", "battery_drain", "flat_tire"]
         SEVERITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
         try:
@@ -1193,7 +1216,7 @@ class SimulatorEngine:
                     )
 
                     now = time.time()
-                    if (now - last_anomaly_injection) >= ANOMALY_INTERVAL and self.ambulances:
+                    if (now - last_anomaly_injection) >= ANOMALY_INTERVAL / max(0.1, self.fault_frequency) and self.ambulances:
                         target_id = random.choice(list(self.ambulances.keys()))
                         target_amb = self.ambulances[target_id]
                         fault = random.choice(FAULT_TYPES)
@@ -1210,6 +1233,187 @@ class SimulatorEngine:
         finally:
             self._auto_sim_active = False
             self.log_network("[AUTO-SIM] Hilo de emergencias automáticas finalizado.")
+
+    def _rul_monitor_loop(self) -> None:
+        """Monitoriza el RUL de cada ambulancia y reacciona ante averías graves y RUL crítico."""
+        try:
+            while self.running and getattr(self, '_rul_monitor_active', False):
+                time.sleep(5.0)  # Comprobar cada 5s de tiempo real
+
+                if not self.is_simulating:
+                    continue
+
+                for amb_id, ambulance in list(self.ambulances.items()):
+                    try:
+                        mission_status = getattr(ambulance.logistics, 'mission_status', None)
+
+                        # — Auto-reparación: ambulancia en mantenimiento con temporizador —
+                        if mission_status == MissionStatus.MAINTENANCE.value:
+                            if amb_id not in self._repair_timers:
+                                # Sin temporizador: registrar ahora para auto-reparar tras la duración
+                                self._repair_timers[amb_id] = time.time()
+                            repair_started = self._repair_timers[amb_id]
+                            is_breakdown = getattr(ambulance.mechanical, 'broken', False)
+                            base_duration = 180.0 if is_breakdown else 120.0
+                            repair_duration = max(10.0, base_duration / max(1, self.speed_multiplier))
+                            if (time.time() - repair_started) >= repair_duration:
+                                ambulance.mechanical.perform_maintenance()
+                                ambulance.logistics.mission_status = MissionStatus.ACTIVE.value
+                                ambulance.logistics.action_message = "✅ Mantenimiento completado. Disponible para servicio."
+                                self._repair_timers.pop(amb_id, None)
+                                self._rul_warned.discard(amb_id)
+                                self._rul_warned.discard(f"{amb_id}:anomaly")
+                                self.log_network(
+                                    f"[MANTENIMIENTO] ✅ {amb_id}: Reparación automática completada. Unidad operativa."
+                                )
+                            continue  # No procesar otros checks mientras está en mantenimiento
+
+                        # — Avería total: ambulancia dañada y no está ya en MAINTENANCE —
+                        if (getattr(ambulance.mechanical, 'broken', False)
+                                and mission_status != MissionStatus.MAINTENANCE.value):
+                            self._handle_breakdown(amb_id, ambulance)
+                            continue
+
+                        # — RUL CRÍTICO: vida útil restante < 8h —
+                        rul_data = ambulance.current_state.get("ai_prediction", {}).get("rul", {})
+                        alert_level = rul_data.get("alert_level", "NORMAL")
+                        hours_remaining = rul_data.get("hours_remaining", 120.0)
+
+                        if (alert_level == "CRÍTICO"
+                                and mission_status not in (
+                                    MissionStatus.MAINTENANCE.value,
+                                    MissionStatus.STRANDED.value,
+                                )):
+                            self._handle_predictive_maintenance(amb_id, ambulance)
+                            self._rul_warned.discard(amb_id)
+
+                        elif alert_level == "ALERTA" and amb_id not in self._rul_warned:
+                            self.log_network(
+                                f"[RUL] ⚠️ {amb_id}: RUL en ALERTA — "
+                                f"{hours_remaining:.1f}h restantes de motor. "
+                                f"Asegúrese de planificar mantenimiento pronto."
+                            )
+                            self._rul_warned.add(amb_id)
+
+                        elif alert_level in ("NORMAL", "PRECAUCIÓN"):
+                            self._rul_warned.discard(amb_id)
+
+                        # — Predictor IA: anomalía mecánica detectada con alta confianza —
+                        anomaly_data = ambulance.current_state.get("ai_prediction", {})
+                        anomaly_key = f"{amb_id}:anomaly"
+                        anomaly_score = float(anomaly_data.get("score", 0.0))
+                        if (
+                            anomaly_data.get("anomaly", False)
+                            and anomaly_score >= 0.65
+                            and mission_status not in (
+                                MissionStatus.MAINTENANCE.value,
+                                MissionStatus.STRANDED.value,
+                            )
+                            and anomaly_key not in self._rul_warned
+                        ):
+                            details = anomaly_data.get("details") or "anomalía estadística detectada"
+                            self.log_network(
+                                f"[IA] 🔍 {amb_id}: Predictor detecta anomalía mecánica "
+                                f"(confianza={anomaly_score:.2f}) — {details}"
+                            )
+                            self._rul_warned.add(anomaly_key)
+                            # Acción preventiva cuando la confianza es muy alta y la unidad está libre
+                            engine_hours = float(
+                            ambulance.current_state.get("mechanical", {}).get("engine_hours", 0.0)
+                        )
+                        anomaly_details = str(anomaly_data.get("details", ""))
+                        has_specific_breach = (
+                            bool(anomaly_details)
+                            and anomaly_details != "Patrón estadístico anómalo detectado"
+                        )
+                        if (
+                                anomaly_score >= 0.85
+                                and mission_status == MissionStatus.ACTIVE.value
+                                and not getattr(ambulance, 'refuel_pending', False)
+                                and engine_hours >= 1.0  # ignorar ambulancias recién desplegadas
+                                and has_specific_breach   # requiere fallo medible, no solo patrón estadístico
+                            ):
+                                self.log_network(
+                                    f"[IA] 🟡 {amb_id}: Alta confianza ({anomaly_score:.2f}) — "
+                                    f"enviando preventivamente a revisión mecánica."
+                                )
+                                try:
+                                    ambulance.logistics.route_to_nearest("HOSPITAL")
+                                except Exception:
+                                    pass
+                                ambulance.logistics.mission_status = MissionStatus.MAINTENANCE.value
+                                ambulance.logistics.action_message = "🟡 REVISIÓN PREVENTIVA — Anomalía IA detectada. Revisión automática en curso (~2 min)."
+                                self._repair_timers[amb_id] = time.time()
+                        elif not anomaly_data.get("anomaly", False):
+                            self._rul_warned.discard(anomaly_key)
+
+                    except Exception as exc:
+                        logger.warning(f"[RUL-MONITOR] Error comprobando {amb_id}: {exc}")
+
+        except Exception as exc:
+            logger.error(f"[RUL-MONITOR] Error en bucle RUL: {exc}")
+        finally:
+            self._rul_monitor_active = False
+            self.log_network("[RUL-MONITOR] Monitor RUL finalizado.")
+
+    def _handle_breakdown(self, amb_id: str, ambulance: Any) -> None:
+        """Gestiona una avería grave: pone la ambulancia en MAINTENANCE, reasigna emergencias."""
+        self.log_network(
+            f"[AVERÍA] 🔴 {amb_id} ha sufrido una avería grave. "
+            f"Motor inmovilizado — enviando al hospital más cercano para reparación."
+        )
+
+        # Aseguramos estado de fallo
+        ambulance.mechanical.broken = True
+        ambulance.mechanical.engine_on = False
+        ambulance.logistics.speed = 0.0
+        ambulance.logistics.acceleration = 0.0
+
+        # Reasignar cualquier emergencia que tuviera asignada
+        for em in self.active_emergencies.values():
+            if em.get("assigned_ambulance") == amb_id and em["status"] not in ("COMPLETED", "CANCELLED"):
+                em["assigned_ambulance"] = None
+                em["status"] = "INITIATED"
+                self.log_network(
+                    f"[URGENCIA {em['id']}] ⚡ Reasignando — ambulancia {amb_id} averiada."
+                )
+
+        # Enrutar al hospital más cercano
+        try:
+            ambulance.logistics.route_to_nearest("HOSPITAL")
+        except Exception:
+            pass  # Si el enrutamiento falla, igualmente ponemos MAINTENANCE
+
+        ambulance.logistics.mission_status = MissionStatus.MAINTENANCE.value
+        ambulance.logistics.action_message = "🔴 AVERIADA — Reparación automática en curso (~3 min)."
+        self._repair_timers[amb_id] = time.time()
+
+        # Intentar reasignar las emergencias huérfanas a otra unidad
+        self.evaluate_fleet_assignments()
+
+    def _handle_predictive_maintenance(self, amb_id: str, ambulance: Any) -> None:
+        """Envía preventivamente la ambulancia a mantenimiento cuando el RUL es crítico."""
+        mission_status = getattr(ambulance.logistics, 'mission_status', None)
+        if mission_status != MissionStatus.ACTIVE.value:
+            # Solo actuar si está en ACTIVE (no en medio de una misión o repostaje)
+            return
+
+        rul_data = ambulance.current_state.get("ai_prediction", {}).get("rul", {})
+        hours_remaining = rul_data.get("hours_remaining", 0.0)
+
+        self.log_network(
+            f"[RUL] 🟠 {amb_id}: RUL CRÍTICO ({hours_remaining:.1f}h restantes). "
+            f"Enviando preventivamente a hospital para mantenimiento urgente."
+        )
+
+        try:
+            ambulance.logistics.route_to_nearest("HOSPITAL")
+        except Exception:
+            pass
+
+        ambulance.logistics.mission_status = MissionStatus.MAINTENANCE.value
+        ambulance.logistics.action_message = "🟠 MANTENIMIENTO PREVENTIVO — RUL crítico. Reparación automática en curso (~2 min)."
+        self._repair_timers[amb_id] = time.time()
 
     def _auto_jam_loop(self) -> None:
         """Genera y elimina atascos aleatorios cerca de hospitales."""

@@ -24,6 +24,10 @@ class MechanicalEngine:
         self.engine_hours = 0.0  # Horas de funcionamiento
         self.last_maintenance_hours = 0.0  # Horas desde último mantenimiento
 
+        # Conjunto de averías activas — impide que step() sobreescriba los valores inyectados
+        self._active_faults: set = set()
+        self._flat_tire_idx: int = -1  # Índice del neumático pinchado (-1 si ninguno)
+
     def step(self, dt: float = 1.0, distance_km: float = 0.0, 
              speed_multiplier: float = 1.0, engine_on: bool = True) -> Dict:
         """
@@ -62,20 +66,40 @@ class MechanicalEngine:
                     self.engine_on = False
                 
                 # Desgaste y temperaturas durante operación
-                self.oil_pressure = max(10.0, 40.0 + random.uniform(-3.0, 3.0) - (self.engine_hours * 0.001))
-                self.engine_temperature = min(115.0, 90.0 + random.uniform(0.0, 8.0) + (distance_km * 1.5))
+                if 'low_oil' in self._active_faults:
+                    # Avería activa: presión de aceite sigue cayendo progresivamente
+                    self.oil_pressure = max(2.0, self.oil_pressure - random.uniform(0.0, 0.3 * adjusted_dt))
+                else:
+                    self.oil_pressure = max(10.0, 40.0 + random.uniform(-3.0, 3.0) - (self.engine_hours * 0.001))
+
+                if 'overheating' in self._active_faults:
+                    # Avería activa: temperatura sigue subiendo por encima del límite normal
+                    self.engine_temperature = min(145.0, self.engine_temperature + random.uniform(0.5, 2.0) * adjusted_dt)
+                    self.coolant_level = max(5.0, self.coolant_level - (0.08 * adjusted_dt))
+                else:
+                    self.engine_temperature = min(115.0, 90.0 + random.uniform(0.0, 8.0) + (distance_km * 1.5))
+                    # Desgaste progresivo del refrigerante solo en operación normal
+                    self.coolant_level = max(50.0, self.coolant_level - (0.0005 * adjusted_dt))
+
                 self.transmission_temperature = min(100.0, 85.0 + random.uniform(0.0, 5.0) + (distance_km * 0.8))
-                
+
                 # Desgaste progresivo
-                self.coolant_level = max(50.0, self.coolant_level - (0.0005 * adjusted_dt))
                 self.oil_level = max(30.0, self.oil_level - (0.0003 * adjusted_dt))
                 self.brake_wear = min(100.0, self.brake_wear + (0.008 * adjusted_dt))
-                self.brake_fluid_level = max(60.0, self.brake_fluid_level - (0.0001 * adjusted_dt))
-                
+                if 'brake_failure' in self._active_faults:
+                    # Líquido de frenos sigue cayendo por debajo del límite normal
+                    self.brake_fluid_level = max(5.0, self.brake_fluid_level - (0.05 * adjusted_dt))
+                else:
+                    self.brake_fluid_level = max(60.0, self.brake_fluid_level - (0.0001 * adjusted_dt))
+
                 # Desgaste de neumáticos proporcional a distancia
                 for i in range(4):
                     self.tire_tread_depth[i] = max(1.6, self.tire_tread_depth[i] - (distance_km * 0.00002))
-                    self.tire_pressure[i] = max(20.0, self.tire_pressure[i] - random.uniform(0.0, 0.003 * adjusted_dt))
+                    if 'flat_tire' in self._active_faults and i == self._flat_tire_idx:
+                        # Neumático pinchado: presión sigue cayendo lentamente
+                        self.tire_pressure[i] = max(0.0, self.tire_pressure[i] - random.uniform(0.1, 0.5) * adjusted_dt)
+                    else:
+                        self.tire_pressure[i] = max(20.0, self.tire_pressure[i] - random.uniform(0.0, 0.003 * adjusted_dt))
                     
             else:
                 # Motor apagado, enfriamiento
@@ -86,6 +110,10 @@ class MechanicalEngine:
         # Drenaje pasivo de batería (mayor si motor apagado)
         if not engine_on:
             self.battery_level = max(0.0, self.battery_level - (0.01 * adjusted_dt))
+        elif 'battery_drain' in self._active_faults:
+            # Avería activa: alternador dañado, batería se descarga incluso con motor encendido
+            self.battery_level = max(0.0, self.battery_level - (0.08 * adjusted_dt))
+            self.alternator_voltage = max(9.0, self.alternator_voltage - random.uniform(0.0, 0.05 * adjusted_dt))
         else:
             # Motor encendido, alternador carga la batería
             self.battery_level = min(100.0, self.battery_level + (0.1 * adjusted_dt))
@@ -94,7 +122,22 @@ class MechanicalEngine:
         # Pequeñas fluctuaciones aleatorias
         self.oil_pressure += random.uniform(-0.5, 0.5)
         self.engine_temperature += random.uniform(-0.3, 0.3)
-        
+
+        # Auto-avería: cuando una falla activa supera umbrales peligrosos,
+        # el sistema se inmoviliza para que el motor de simulación lo gestione.
+        if not self.broken:
+            if 'overheating' in self._active_faults and self.engine_temperature >= 140.0:
+                self.broken = True
+                self.engine_on = False
+            elif 'low_oil' in self._active_faults and self.oil_pressure <= 3.0:
+                self.broken = True
+                self.engine_on = False
+            elif 'flat_tire' in self._active_faults and min(self.tire_pressure) <= 2.0:
+                self.broken = True
+            elif 'battery_drain' in self._active_faults and self.battery_level <= 2.0:
+                self.broken = True
+                self.engine_on = False
+
         return self.get_state()
 
     def get_state(self) -> Dict:
@@ -150,8 +193,10 @@ class MechanicalEngine:
         Args:
             fault_type: Tipo de falla a inyectar
         """
+        self._active_faults.add(fault_type)
         if fault_type == "flat_tire":
             tire_idx = random.randint(0, 3)
+            self._flat_tire_idx = tire_idx
             self.tire_pressure[tire_idx] = 10.0
             self.tire_tread_depth[tire_idx] = max(1.0, self.tire_tread_depth[tire_idx] - 3.0)
         elif fault_type == "engine_failure":
@@ -163,7 +208,10 @@ class MechanicalEngine:
             self.oil_pressure = 18.0
         elif fault_type == "brake_failure":
             self.brake_wear = 95.0
-            self.brake_fluid_level = 30.0
+            self.brake_fluid_level = 15.0
+            # Los frenos fallidos son peligro inmediato — avería instantánea
+            self.broken = True
+            self.engine_on = False
         elif fault_type == "battery_drain":
             self.battery_level = 15.0
             self.alternator_voltage = 11.5
@@ -189,3 +237,5 @@ class MechanicalEngine:
         self.is_refueling = False
         self.engine_on = True
         self.last_maintenance_hours = self.engine_hours
+        self._active_faults.clear()
+        self._flat_tire_idx = -1
