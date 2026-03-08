@@ -764,14 +764,14 @@ function updateFleetUI() {
         const aiAnomaly = amb.ai_prediction?.anomaly === true;
 
         // Card border class — recomputed each tick so anomaly state is always reflected
-        const cardBase = 'p-3 rounded-lg border cursor-pointer hover:shadow-md transition-all bg-white';
+        const cardBase = 'relative p-3 rounded-lg border cursor-pointer hover:shadow-md transition-all bg-white';
         const cardCls = aiAnomaly
             ? `${cardBase} border-red-500 animate-pulse`
             : `${cardBase} border-slate-200 hover:border-blue-300`;
 
-        // AI badge class — never carries animate-pulse when hidden
+        // AI badge class — absolute top-right so it never disturbs the header flex or telemetry grid
         const aiAlertCls = aiAnomaly
-            ? 'ai-alert text-xs font-bold px-1.5 py-0.5 rounded flex items-center gap-1 bg-red-100 text-red-700 animate-pulse'
+            ? 'ai-alert absolute top-1 right-1 text-xs font-bold px-1.5 py-0.5 rounded bg-red-100 text-red-700 animate-pulse z-10'
             : 'ai-alert hidden';
 
         let card = document.getElementById(`card-${amId}`);
@@ -783,11 +783,11 @@ function updateFleetUI() {
             card.className = cardCls;
 
             card.innerHTML = `
+                <span class="${aiAlertCls}">⚠️ FALLO PREVISTO</span>
                 <div class="flex items-center justify-between mb-2 flex-wrap gap-1">
                     <span class="font-bold cursor-pointer hover:underline text-lg uppercase title-tag ${colorTitle}">🚑 ${amId}</span>
                     <div class="flex items-center gap-1">
                         <span class="status-badge text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}">${statusBadge}</span>
-                        <span class="${aiAlertCls}">⚠️ FALLO PREVISTO</span>
                     </div>
                 </div>
                 <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">

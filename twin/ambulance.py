@@ -54,6 +54,11 @@ class AmbulanceTwin:
 
         # IA: detector de anomalías mecánicas
         self.ai_anomaly_detected: bool = False
+
+        # Flag de repostaje pendiente — seteado por engine.py, consumido por _manage_fuel_and_maintenance
+        # Desacopla la detección de llegada a gasolinera del campo destination_type (que logistics.py
+        # borra atómicamente en _arrive_at_destination antes de que el twin pueda leerlo).
+        self.refuel_pending: bool = False
         
         # Configurar logger
         self.logger = logging.getLogger(f"AmbulanceTwin.{self.id}")
@@ -157,27 +162,24 @@ class AmbulanceTwin:
     def _manage_fuel_and_maintenance(self, distance_km: float) -> None:
         """
         Gestiona automáticamente combustible, repostaje y mantenimiento.
+
+        La decisión de iniciar repostaje está centralizada en engine.py
+        (_manage_proactive_refueling), que setea self.refuel_pending = True y
+        enruta la ambulancia a la gasolinera más cercana. Este método sólo
+        gestiona la transición de llegada → is_refueling y la finalización.
         
         Args:
             distance_km: Distancia recorrida en el último paso
         """
-        # Lógica de repostaje automático
-        if (self.mechanical.fuel_level < 40.0 and 
-            not self.mechanical.is_refueling and 
-            self.logistics.mission_status == "ACTIVE"):
-            
-            self.logistics.mission_status = "INACTIVE"
-            self.logistics.route_to_nearest("GAS_STATION")
-            self.logistics.action_message = "Enrutando a Gasolinera"
-            self.log_callback(f"[{self.id}] ⛽ Combustible bajo ({self.mechanical.fuel_level:.1f}%). Enrutando a repostaje.")
-        
-        # Llegada a gasolinera
-        if (self.logistics.destination is None and 
-            self.logistics.destination_type == "GAS_STATION" and 
+        # Llegada a gasolinera — usa refuel_pending en lugar de destination_type
+        # para evitar la condición de carrera con logistics._arrive_at_destination(),
+        # que borra destination_type antes de que este método pueda leerlo.
+        if (self.logistics.destination is None and
+            self.refuel_pending and
             self.logistics.mission_status == "INACTIVE"):
-            
+
             self.mechanical.is_refueling = True
-            self.logistics.destination_type = None
+            self.refuel_pending = False          # consumir el flag
             self.logistics.action_message = "Repostando (Bomba conectada)"
         
         # Finalización de repostaje - exactamente 100%

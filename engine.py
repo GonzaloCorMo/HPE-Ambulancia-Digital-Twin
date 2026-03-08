@@ -183,6 +183,10 @@ class SimulatorEngine:
         # Verificar si está repostando
         if getattr(ambulance.mechanical, 'is_refueling', False):
             return False
+
+        # Verificar si ya está en ruta a gasolinera (flag seteado por _manage_proactive_refueling)
+        if getattr(ambulance, 'refuel_pending', False):
+            return False
         
         # Verificar combustible suficiente (mínimo 30%)
         if getattr(ambulance.mechanical, 'fuel_level', 0) < 30.0:
@@ -343,8 +347,8 @@ class SimulatorEngine:
             
             try:
                 self._monitor_emergency_progress()
-                self._manage_idle_ambulances()
                 self._manage_proactive_refueling()
+                self._manage_idle_ambulances()
                 self._update_statistics()
                 
             except Exception as e:
@@ -494,11 +498,16 @@ class SimulatorEngine:
             return
         
         for ambulance in self.ambulances.values():
-            # Solo ambulancias activas sin destino
+            # Solo ambulancias activas sin destino y con combustible >= 30%.
+            # Las de bajo combustible son gestionadas por _manage_proactive_refueling,
+            # que ya corre antes en el loop. Sin este guard, idle ruteaba a BASE
+            # ambulancias en la zona muerta 20-30% que el dispatcher rechaza,
+            # dejandolas paralizadas indefinidamente.
             if (hasattr(ambulance.logistics, 'mission_status') and 
                 ambulance.logistics.mission_status == MissionStatus.ACTIVE.value and
                 hasattr(ambulance.logistics, 'destination') and
-                ambulance.logistics.destination is None):
+                ambulance.logistics.destination is None and
+                getattr(ambulance.mechanical, 'fuel_level', 100.0) >= 30.0):
                 
                 # Verificar si ya está en un hospital
                 at_hospital = False
@@ -548,12 +557,15 @@ class SimulatorEngine:
             mission      = getattr(ambulance.logistics,  'mission_status', '')
             is_refueling = getattr(ambulance.mechanical, 'is_refueling',   False)
 
-            # Actuar solo sobre ambulancias activas, sin paciente, con poco combustible
-            # y que no tengan ruta activa
+            # Actuar sobre ambulancias activas, sin paciente, combustible < 30%,
+            # sin ruta activa y sin repostaje ya en progreso.
+            # Umbral en 30% = mismo umbral del dispatcher (_is_ambulance_available),
+            # cerrando la zona muerta 20-30% donde las ambulancias quedaban paralizadas.
             if not (
-                fuel < 20.0
+                fuel < 30.0
                 and not has_patient
                 and not is_refueling
+                and not getattr(ambulance, 'refuel_pending', False)
                 and mission == MissionStatus.ACTIVE.value
                 and hasattr(ambulance.logistics, 'destination')
                 and ambulance.logistics.destination is None
@@ -564,6 +576,7 @@ class SimulatorEngine:
                 success = ambulance.logistics.route_to_nearest("GAS_STATION")
                 if success:
                     ambulance.logistics.mission_status = MissionStatus.INACTIVE.value
+                    ambulance.refuel_pending = True          # marca para twin._manage_fuel_and_maintenance
                     ambulance.logistics.action_message = (
                         f"Repostaje preventivo ({fuel:.0f}% restante)"
                     )
@@ -610,9 +623,9 @@ class SimulatorEngine:
         Actualiza multiplicador de velocidad de simulación.
         
         Args:
-            val: Nuevo multiplicador (1-10)
+            val: Nuevo multiplicador (1-50)
         """
-        self.speed_multiplier = max(1, min(10, val))
+        self.speed_multiplier = max(1, min(50, val))
         for ambulance in self.ambulances.values():
             if hasattr(ambulance, 'speed_multiplier'):
                 ambulance.speed_multiplier = self.speed_multiplier
