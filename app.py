@@ -60,7 +60,7 @@ async def state_broadcaster():
             # Compilar estado de la flota
             fleet_state = {}
             for am_id, amb in engine.ambulances.items():
-                if hasattr(amb, 'current_state') and amb.current_state:
+                if hasattr(amb, 'current_state'):
                     fleet_state[am_id] = amb.current_state
             
             # Estadísticas del sistema

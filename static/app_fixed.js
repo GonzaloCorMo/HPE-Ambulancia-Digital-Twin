@@ -689,6 +689,13 @@ function updateFleetUI() {
     
     if (DEBUG) console.log('Current DOM IDs:', currentDomIds, 'State ambulance IDs:', stateAmIds);
 
+    // Remove placeholder div (no data-am-id) if there are ambulances to show
+    if (stateAmIds.length > 0) {
+        Array.from(fleetContainer.children).forEach(child => {
+            if (!child.dataset.amId) child.remove();
+        });
+    }
+
     // Remove deleted
     currentDomIds.filter(id => !stateAmIds.includes(id)).forEach(id => {
         const el = document.getElementById(`card-${id}`);
@@ -988,6 +995,31 @@ if (btnClear) {
             postJson('/api/control/clear', {}); 
             addTerminalLog('[CONTROL] Limpiando escenario...');
         }
+    });
+}
+
+const btnAutoSim = document.getElementById('btn-auto-sim');
+if (btnAutoSim) {
+    btnAutoSim.addEventListener('click', () => {
+        if (!confirm('¿Iniciar simulación autónoma de Madrid?\n\nSe desplegarán:\n• 3 hospitales reales (La Paz, Gregorio Marañón, 12 de Octubre)\n• 2 gasolineras estratégicas\n• 4 ambulancias operativas\n\nSe generarán emergencias automáticas cada 20-30 s\ny anomalías IA cada 2 min.')) return;
+        btnAutoSim.disabled = true;
+        btnAutoSim.textContent = '⏳ Iniciando...';
+        addTerminalLog('[AUTO-SIM] Solicitando simulación autónoma al servidor...');
+        postJson('/api/auto_simulation', {})
+            .then(data => {
+                if (data.status === 'started') {
+                    addTerminalLog('[AUTO-SIM] 🤖 Simulación autónoma de Madrid iniciada.');
+                    if (data.message) addTerminalLog(`[AUTO-SIM] ${data.message}`);
+                    if (data.ambulances) addTerminalLog(`[AUTO-SIM] ${data.ambulances} ambulancias desplegadas.`);
+                }
+            })
+            .catch(e => {
+                addTerminalLog(`[ERROR] No se pudo iniciar la simulación autónoma: ${e.message}`);
+            })
+            .finally(() => {
+                btnAutoSim.disabled = false;
+                btnAutoSim.innerHTML = '<i class="fas fa-robot"></i><span>🤖 SIMULACIÓN AUTÓNOMA</span>';
+            });
     });
 }
 

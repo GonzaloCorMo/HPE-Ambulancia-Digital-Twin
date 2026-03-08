@@ -778,6 +778,11 @@ class SimulatorEngine:
           - Hilo daemon que genera emergencias aleatorias cada 20-30 segundos
           - Inyeccion periodica de anomalias mecanicas para demostrar el predictor IA
         """
+        # Evitar doble inicializacion: si el hilo ya corre, notificar y salir
+        if getattr(self, '_auto_sim_active', False):
+            self.log_network("[AUTO-SIM] Hilo de simulacion automatica ya activo.")
+            return
+
         self.log_network("[AUTO-SIM] Iniciando simulacion autonoma de Madrid...")
 
         # --- 1. Hospitales reales de Madrid ---
@@ -819,11 +824,7 @@ class SimulatorEngine:
         if not self.is_simulating:
             self.toggle_playback()
 
-        # --- 5. Iniciar hilo generador de emergencias (solo uno a la vez) ---
-        if getattr(self, '_auto_sim_active', False):
-            self.log_network("[AUTO-SIM] Hilo de simulacion automatica ya activo.")
-            return
-
+        # --- 5. Iniciar hilo generador de emergencias ---
         self._auto_sim_active = True
         self._auto_sim_thread = threading.Thread(
             target=self._auto_emergency_loop,
@@ -846,45 +847,50 @@ class SimulatorEngine:
         FAULT_TYPES = ["overheating", "low_oil", "brake_failure", "battery_drain"]
         SEVERITIES   = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
-        while self.running and getattr(self, '_auto_sim_active', False):
-            if not self.is_simulating:
-                time.sleep(1.0)
-                continue
+        try:
+            while self.running and getattr(self, '_auto_sim_active', False):
+                if not self.is_simulating:
+                    time.sleep(1.0)
+                    continue
 
-            try:
-                # Esperar 20-30 s (acelerado por speed_multiplier)
-                sleep_s = random.uniform(20.0, 30.0) / max(1, self.speed_multiplier)
-                time.sleep(sleep_s)
+                try:
+                    # Esperar 20-30 s (acelerado por speed_multiplier)
+                    sleep_s = random.uniform(20.0, 30.0) / max(1, self.speed_multiplier)
+                    time.sleep(sleep_s)
 
-                if not self.is_simulating or not self.running:
-                    break
+                    if not self.is_simulating or not self.running:
+                        break
 
-                # Emergencia aleatoria dentro de ~10 km del centro de Madrid
-                em_lat, em_lon = self._generate_random_madrid_coords(radius_km=10.0)
-                severity = random.choice(SEVERITIES)
-                em_id = self.spawn_emergency(em_lat, em_lon, severity)
-                self.log_network(
-                    f"[AUTO-SIM] Emergencia auto-generada {em_id} "
-                    f"({severity}) en ({em_lat:.4f}, {em_lon:.4f})"
-                )
+                    # Emergencia aleatoria dentro de ~10 km del centro de Madrid
+                    em_lat, em_lon = self._generate_random_madrid_coords(radius_km=10.0)
+                    severity = random.choice(SEVERITIES)
+                    em_id = self.spawn_emergency(em_lat, em_lon, severity)
+                    self.log_network(
+                        f"[AUTO-SIM] Emergencia auto-generada {em_id} "
+                        f"({severity}) en ({em_lat:.4f}, {em_lon:.4f})"
+                    )
 
-                # Inyeccion periodica de anomalia para demostrar el predictor IA
-                now = time.time()
-                if (now - last_anomaly_injection) >= ANOMALY_INTERVAL and self.ambulances:
-                    target_id = random.choice(list(self.ambulances.keys()))
-                    target_amb = self.ambulances[target_id]
-                    fault = random.choice(FAULT_TYPES)
-                    if hasattr(target_amb.mechanical, 'inject_fault'):
-                        target_amb.mechanical.inject_fault(fault)
-                        self.log_network(
-                            f"[AUTO-SIM] Anomalia '{fault}' inyectada en {target_id} "
-                            f"- Predictor IA deberia detectarla en breve."
-                        )
-                    last_anomaly_injection = now
+                    # Inyeccion periodica de anomalia para demostrar el predictor IA
+                    now = time.time()
+                    if (now - last_anomaly_injection) >= ANOMALY_INTERVAL and self.ambulances:
+                        target_id = random.choice(list(self.ambulances.keys()))
+                        target_amb = self.ambulances[target_id]
+                        fault = random.choice(FAULT_TYPES)
+                        if hasattr(target_amb.mechanical, 'inject_fault'):
+                            target_amb.mechanical.inject_fault(fault)
+                            self.log_network(
+                                f"[AUTO-SIM] Anomalia '{fault}' inyectada en {target_id} "
+                                f"- Predictor IA deberia detectarla en breve."
+                            )
+                        last_anomaly_injection = now
 
-            except Exception as exc:
-                logger.error(f"[AUTO-SIM] Error en bucle automatico: {exc}")
-                time.sleep(5.0)
+                except Exception as exc:
+                    logger.error(f"[AUTO-SIM] Error en bucle automatico: {exc}")
+                    self.log_network(f"[AUTO-SIM] \u26a0\ufe0f Error en iteracion del bucle: {exc}")
+                    time.sleep(5.0)
+        finally:
+            self._auto_sim_active = False
+            self.log_network("[AUTO-SIM] Hilo de simulacion autonoma finalizado.")
 
     def _generate_random_madrid_coords(self, radius_km: float = 10.0) -> tuple:
         """

@@ -707,21 +707,18 @@ function updateStatistics(state) {
 
 function updateFleetUI() {
     if (!fleetContainer) return;
-    
+
     // Collect existing keys to remove dead ones, and add/update others
     const currentDomIds = Array.from(fleetContainer.children)
         .map(c => c.dataset.amId)
         .filter(id => id); // Filter out undefined
-    
+
     const stateAmIds = Object.keys(simState.ambulances);
 
     // Remove placeholder if there are ambulances (placeholder has no data-amId)
     if (stateAmIds.length > 0) {
-        // Find and remove any placeholder elements (no data-amId)
         Array.from(fleetContainer.children).forEach(child => {
-            if (!child.dataset.amId) {
-                child.remove();
-            }
+            if (!child.dataset.amId) child.remove();
         });
     }
 
@@ -735,17 +732,17 @@ function updateFleetUI() {
     stateAmIds.forEach(amId => {
         const amb = simState.ambulances[amId];
         if (!amb) return;
-        
+
         const v = amb.vitals || {};
         const m = amb.mechanical || {};
         const l = amb.logistics || {};
 
         const ms = l.mission_status || "ACTIVE";
         const hasPatient = v.has_patient || false;
-        
+
         let colorTitle = 'text-emerald-500';
         let statusBadge = '🟢 ACTIVA';
-        
+
         if (ms === "IN_USE") {
             colorTitle = 'text-blue-500';
             statusBadge = hasPatient ? '🏥 TRANSPORTE' : '🚨 EN CAMINO';
@@ -763,21 +760,34 @@ function updateFleetUI() {
             statusBadge = '🪴 VARADA';
         }
 
-        const aiAnomaly = amb.ai_prediction && amb.ai_prediction.anomaly === true;
+        // Safe optional-chaining check — avoids crash when ai_prediction is null/undefined
+        const aiAnomaly = amb.ai_prediction?.anomaly === true;
+
+        // Card border class — recomputed each tick so anomaly state is always reflected
+        const cardBase = 'p-3 rounded-lg border cursor-pointer hover:shadow-md transition-all bg-white';
+        const cardCls = aiAnomaly
+            ? `${cardBase} border-red-500 animate-pulse`
+            : `${cardBase} border-slate-200 hover:border-blue-300`;
+
+        // AI badge class — never carries animate-pulse when hidden
+        const aiAlertCls = aiAnomaly
+            ? 'ai-alert text-xs font-bold px-1.5 py-0.5 rounded flex items-center gap-1 bg-red-100 text-red-700 animate-pulse'
+            : 'ai-alert hidden';
+
         let card = document.getElementById(`card-${amId}`);
         if (!card) {
-            // Create
+            // ── CREATE ──────────────────────────────────────────────────────────
             card = document.createElement('div');
             card.id = `card-${amId}`;
             card.dataset.amId = amId;
-            card.className = "p-3 rounded-lg border cursor-pointer hover:shadow-md transition-shadow bg-white border-slate-200 hover:border-blue-300";
+            card.className = cardCls;
 
             card.innerHTML = `
                 <div class="flex items-center justify-between mb-2 flex-wrap gap-1">
                     <span class="font-bold cursor-pointer hover:underline text-lg uppercase title-tag ${colorTitle}">🚑 ${amId}</span>
                     <div class="flex items-center gap-1">
                         <span class="status-badge text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}">${statusBadge}</span>
-                        <span class="ai-alert text-xs font-bold text-red-600 animate-pulse${aiAnomaly ? '' : ' hidden'}">&#x26A0;&#xFE0F; FALLO PREVISTO</span>
+                        <span class="${aiAlertCls}">⚠️ FALLO PREVISTO</span>
                     </div>
                 </div>
                 <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
@@ -794,11 +804,11 @@ function updateFleetUI() {
                         <span class="font-semibold">Destino:</span> ${l.destination_type || 'NONE'}
                     </div>
                 </div>
-                <div class="mt-2 text-xs text-slate-500 truncate">
+                <div class="mt-2 text-xs text-slate-500 truncate action-msg">
                     ${l.action_message || "Esperando órdenes"}
                 </div>
             `;
-            
+
             // Modal hooking
             const titleEl = card.querySelector('.title-tag');
             if (titleEl) {
@@ -807,61 +817,56 @@ function updateFleetUI() {
                     openAmbulanceDetails(amId);
                 });
             }
-            
+
             // Card click for quick actions
             card.addEventListener('click', (e) => {
                 if (!e.target.closest('.title-tag')) {
                     openAmbulanceDetails(amId);
                 }
             });
-            
+
             fleetContainer.appendChild(card);
         } else {
-            // Update Title color and status
+            // ── UPDATE ──────────────────────────────────────────────────────────
+            // Always sync card border so anomaly activation/deactivation is visible
+            card.className = cardCls;
+
+            // Title color
             const titleEl = card.querySelector('.title-tag');
             if (titleEl) {
                 titleEl.className = `font-bold cursor-pointer hover:underline text-lg uppercase title-tag ${colorTitle}`;
             }
-            
-            // Update status badge
+
+            // Status badge
             const statusEl = card.querySelector('.status-badge');
             if (statusEl) {
                 statusEl.textContent = statusBadge;
                 statusEl.className = `status-badge text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}`;
             }
 
-            // Actualizar alerta IA predictiva
+            // AI anomaly badge — replace full className to avoid stale animate-pulse
             const aiAlertEl = card.querySelector('.ai-alert');
-            if (aiAlertEl) {
-                if (aiAnomaly) {
-                    aiAlertEl.classList.remove('hidden');
-                } else {
-                    aiAlertEl.classList.add('hidden');
-                }
-            }
+            if (aiAlertEl) aiAlertEl.className = aiAlertCls;
 
-            // Update strings
-            const tagVit = card.querySelector('.tag-vit');
+            // Telemetry fields
+            const tagVit  = card.querySelector('.tag-vit');
             const tagMech = card.querySelector('.tag-mech');
-            const tagLog = card.querySelector('.tag-log');
-            const tagNet = card.querySelector('.tag-net');
-            
-            if (tagVit) tagVit.innerHTML = `<span class="font-semibold">Paciente:</span> ${hasPatient ? 'CRÍTICO' : 'NO'}`;
+            const tagLog  = card.querySelector('.tag-log');
+            const tagNet  = card.querySelector('.tag-net');
+
+            if (tagVit)  tagVit.innerHTML  = `<span class="font-semibold">Paciente:</span> ${hasPatient ? 'CRÍTICO' : 'NO'}`;
             if (tagMech) tagMech.innerHTML = `<span class="font-semibold">Combustible:</span> ${m.fuel_level || 0}%`;
-            if (tagLog) tagLog.innerHTML = `<span class="font-semibold">Velocidad:</span> ${Math.round(l.speed || 0)} km/h`;
-            if (tagNet) tagNet.innerHTML = `<span class="font-semibold">Destino:</span> ${l.destination_type || 'NONE'}`;
-            
-            // Update action message
-            const actionEl = card.querySelector('.mt-2.text-xs.text-slate-500');
-            if (actionEl) {
-                actionEl.textContent = l.action_message || "Esperando órdenes";
-            }
+            if (tagLog)  tagLog.innerHTML  = `<span class="font-semibold">Velocidad:</span> ${Math.round(l.speed || 0)} km/h`;
+            if (tagNet)  tagNet.innerHTML  = `<span class="font-semibold">Destino:</span> ${l.destination_type || 'NONE'}`;
+
+            // Action message — uses stable .action-msg class
+            const actionEl = card.querySelector('.action-msg');
+            if (actionEl) actionEl.textContent = l.action_message || "Esperando órdenes";
         }
     });
-    
-    // Show placeholder if no ambulances and no placeholder already exists
+
+    // Show placeholder if no ambulances
     if (stateAmIds.length === 0) {
-        // Check if placeholder already exists (any child without data-amId)
         const hasPlaceholder = Array.from(fleetContainer.children).some(child => !child.dataset.amId);
         if (!hasPlaceholder) {
             fleetContainer.innerHTML = `
@@ -999,18 +1004,27 @@ function focusEmergency(emergencyId) {
 // -------------------------------------------------------------
 // Controls & API REST Calls
 // -------------------------------------------------------------
-function postJson(url, data) {
-    return fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data)
-    })
-    .then(response => response.json())
-    .catch(e => {
-        console.error(`Error on ${url}:`, e);
-        addTerminalLog(`[ERROR] Fallo en petición a ${url}: ${e.message}`);
-        return { error: e.message };
-    });
+async function postJson(url, data) {
+    let response;
+    try {
+        response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data)
+        });
+    } catch (e) {
+        console.error(`Network error on ${url}:`, e);
+        addTerminalLog(`[ERROR] Fallo de red en ${url}: ${e.message}`);
+        throw e;
+    }
+    if (!response.ok) {
+        let detail = response.statusText;
+        try { const body = await response.json(); detail = body.detail || detail; } catch (_) {}
+        console.error(`HTTP ${response.status} on ${url}:`, detail);
+        addTerminalLog(`[ERROR] Error ${response.status} en ${url}: ${detail}`);
+        throw new Error(detail);
+    }
+    return response.json();
 }
 
 if (btnPlay) {
@@ -1036,10 +1050,14 @@ if (btnAutoSim) {
         if (!confirm('¿Iniciar simulación autónoma de Madrid?\n\nSe desplegarán:\n• 3 hospitales reales (La Paz, Gregorio Marañón, 12 de Octubre)\n• 2 gasolineras estratégicas\n• 4 ambulancias operativas\n\nSe generarán emergencias automáticas cada 20-30 s\ny anomalías IA cada 2 min.')) return;
         btnAutoSim.disabled = true;
         btnAutoSim.textContent = '⏳ Iniciando...';
+        addTerminalLog('[AUTO-SIM] Solicitando simulación autónoma al servidor...');
         postJson('/api/auto_simulation', {})
             .then(data => {
-                addTerminalLog('[AUTO-SIM] 🤖 Simulación autónoma de Madrid iniciada.');
-                if (data.message) addTerminalLog(`[AUTO-SIM] ${data.message}`);
+                if (data.status === 'started') {
+                    addTerminalLog('[AUTO-SIM] 🤖 Simulación autónoma de Madrid iniciada.');
+                    if (data.message) addTerminalLog(`[AUTO-SIM] ${data.message}`);
+                    if (data.ambulances) addTerminalLog(`[AUTO-SIM] ${data.ambulances} ambulancias desplegadas.`);
+                }
             })
             .catch(e => {
                 addTerminalLog(`[ERROR] No se pudo iniciar la simulación autónoma: ${e.message}`);
@@ -1048,7 +1066,6 @@ if (btnAutoSim) {
                 btnAutoSim.disabled = false;
                 btnAutoSim.innerHTML = '<i class="fas fa-robot"></i><span>🤖 SIMULACIÓN AUTÓNOMA</span>';
             });
-        addTerminalLog('[AUTO-SIM] Solicitando simulación autónoma al servidor...');
     });
 }
 
