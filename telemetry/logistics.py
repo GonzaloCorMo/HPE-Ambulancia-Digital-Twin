@@ -98,13 +98,16 @@ ROUTE_CACHE: Dict[str, List[Tuple[float, float]]] = {}
 
 # --------------------------------------------------------------------------
 # OSRM routing (Docker local, puerto 5001)
-# Se usa como motor principal de rutas; OSMnx actúa como fallback.
+# Motor primario. Si no está disponible, se usa la API pública de OSRM.
 # --------------------------------------------------------------------------
 OSRM_BASE_URL = "http://localhost:5001"
+OSRM_PUBLIC_URL = "http://router.project-osrm.org"
 _OSRM_AVAILABLE: Optional[bool] = None   # None = no comprobado aún
 _OSRM_LAST_CHECK: float = 0.0
 _OSRM_CHECK_INTERVAL: float = 30.0       # Recomprobar disponibilidad cada 30 s
 _OSRM_LOCK = threading.Lock()
+_OSRM_PUBLIC_LAST_CALL: float = 0.0      # Para rate-limiting de la API pública
+_OSRM_PUBLIC_LOCK = threading.Lock()     # Lock para acceso a _OSRM_PUBLIC_LAST_CALL
 
 
 def _is_osrm_available() -> bool:
@@ -129,7 +132,7 @@ def _is_osrm_available() -> bool:
             logger.info("[OSRM] Servidor disponible en %s", OSRM_BASE_URL)
         else:
             logger.warning(
-                "[OSRM] Servidor no disponible en %s — se usará OSMnx como fallback.",
+                "[OSRM] Servidor local no disponible en %s — se usará la API pública OSRM.",
                 OSRM_BASE_URL,
             )
         return _OSRM_AVAILABLE
@@ -167,6 +170,48 @@ def _route_via_osrm(
         return [(c[1], c[0]) for c in coords_raw]
     except Exception as exc:
         logger.error("[OSRM] Error en consulta: %s", exc)
+        return None
+
+
+def _route_via_osrm_public(
+    orig_lat: float, orig_lon: float,
+    dest_lat: float, dest_lon: float,
+) -> Optional[List[Tuple[float, float]]]:
+    """
+    Consulta la API pública de OSRM (router.project-osrm.org) para obtener la
+    geometría de una ruta. Aplica un rate-limit mínimo de 0.5 s entre llamadas.
+
+    Returns:
+        Lista de (lat, lon) o None si la consulta falla o no hay ruta.
+    """
+    global _OSRM_PUBLIC_LAST_CALL
+    try:
+        with _OSRM_PUBLIC_LOCK:
+            elapsed = time.time() - _OSRM_PUBLIC_LAST_CALL
+            if elapsed < 0.5:
+                time.sleep(0.5 - elapsed)
+            _OSRM_PUBLIC_LAST_CALL = time.time()
+
+        url = (
+            f"{OSRM_PUBLIC_URL}/route/v1/driving/"
+            f"{orig_lon},{orig_lat};{dest_lon},{dest_lat}"
+        )
+        r = requests.get(
+            url,
+            timeout=8.0,
+            params={"overview": "full", "geometries": "geojson"},
+        )
+        if r.status_code != 200:
+            logger.warning("[OSRM-PUBLIC] HTTP %s al calcular ruta", r.status_code)
+            return None
+        data = r.json()
+        if data.get("code") != "Ok" or not data.get("routes"):
+            logger.warning("[OSRM-PUBLIC] Respuesta inesperada: %s", data.get("code"))
+            return None
+        coords_raw = data["routes"][0]["geometry"]["coordinates"]
+        return [(c[1], c[0]) for c in coords_raw]
+    except Exception as exc:
+        logger.error("[OSRM-PUBLIC] Error en consulta: %s", exc)
         return None
 
 
@@ -396,99 +441,41 @@ class LogisticsEngine:
                 return True
             # OSRM activo pero sin ruta para este par orig→dest
             logger.warning(
-                "[OSRM] Sin ruta (%s,%s)→(%s,%s) — fallback a OSMnx",
+                "[OSRM] Sin ruta (%s,%s)→(%s,%s) — fallback a API pública OSRM",
                 self.lat, self.lon, lat, lon,
             )
 
-        # ── Fallback: OSMnx (grafo pre-descargado o descarga automática) ─────
-        try:
-            # Buscar un grafo que cubra tanto origen como destino
-            G = get_graph_covering(self.lat, self.lon, lat, lon)
-
-            if G is None:
-                # Ningún grafo cubre esta zona todavía.
-                # Disparar descarga en background usando el hospital más cercano como centro.
-                hospitals = [p for p in POIS if p.get("type") == "HOSPITAL"]
-                if hospitals:
-                    # Encontrar hospital más cercano al destino para centrar la descarga
-                    nearest = min(
-                        hospitals,
-                        key=lambda h: self._calculate_distance(lat, lon, h["lat"], h["lon"])
-                    )
-                    c_lat, c_lon = nearest["lat"], nearest["lon"]
-                else:
-                    c_lat, c_lon = (self.lat + lat) / 2, (self.lon + lon) / 2
-
-                # Radio dinámico basado en la distancia orig→dest (mín 6 km)
-                dist_km = self._calculate_distance(self.lat, self.lon, lat, lon)
-                radius_m = max(6000, int((dist_km + 4.0) * 1000))
-
-                # Generar una clave basada en la posición redondeada del centro
-                auto_key = f"auto_{round(c_lat, 2)}_{round(c_lon, 2)}"
-                ensure_graph_for_area(c_lat, c_lon, radius_m, auto_key)
-
-                # Usar ruta directa mientras se descarga
-                self.route_geometry = [(lat, lon)]
-                self.routes_calculated += 1
-                logger.info(
-                    f"Ruta directa a {dest_type} "
-                    f"(descargando red viaria en background para '{auto_key}')"
-                )
-                return True
-
-            orig_node = ox.distance.nearest_nodes(G, self.lon, self.lat)
-            dest_node = ox.distance.nearest_nodes(G, lon, lat)
-            
-            # Calcular ruta más corta considerando longitud y tiempo estimado
-            route_nodes = nx.shortest_path(G, orig_node, dest_node, weight='length')
-            
-            coords = []
-            total_distance = 0.0
-            for i in range(len(route_nodes) - 1):
-                node_a = route_nodes[i]
-                node_b = route_nodes[i + 1]
-                
-                # Obtener coordenadas
-                n_data_a = G.nodes[node_a]
-                n_data_b = G.nodes[node_b]
-                coords.append((n_data_a['y'], n_data_a['x']))  # Store as (lat, lon)
-                
-                # Calcular distancia acumulada
-                edge_data = G.get_edge_data(node_a, node_b)
-                if edge_data:
-                    # Tomar la primera edge (puede haber múltiples)
-                    first_key = list(edge_data.keys())[0]
-                    total_distance += edge_data[first_key].get('length', 0)
-            
-            # Añadir último nodo
-            if route_nodes:
-                last_node = route_nodes[-1]
-                last_data = G.nodes[last_node]
-                coords.append((last_data['y'], last_data['x']))
-            
-            # Añadir destino exacto
-            coords.append((lat, lon))
-            
-            # Calcular eficiencia de ruta
+        # ── Fallback: API pública OSRM ────────────────────────────────────────
+        public_coords = _route_via_osrm_public(self.lat, self.lon, lat, lon)
+        if public_coords:
             direct_distance = self._calculate_distance(self.lat, self.lon, lat, lon)
-            if direct_distance > 0:
-                self.route_efficiency = direct_distance / (total_distance + 0.001)
-                self.route_efficiency = min(1.0, max(0.1, self.route_efficiency))
-            
-            self.route_geometry = coords
+            public_km = sum(
+                self._calculate_distance(
+                    public_coords[i][0], public_coords[i][1],
+                    public_coords[i + 1][0], public_coords[i + 1][1],
+                )
+                for i in range(len(public_coords) - 1)
+            ) if len(public_coords) > 1 else direct_distance
+            if direct_distance > 0 and public_km > 0:
+                self.route_efficiency = min(1.0, max(0.1, direct_distance / public_km))
+            self.route_geometry = public_coords
             ROUTE_CACHE[cache_key] = self.route_geometry.copy()
-            
-            logger.info(f"Ruta calculada a {dest_type}: {len(coords)} puntos, "
-                       f"distancia {total_distance:.0f}m, eficiencia {self.route_efficiency:.2f}")
+            logger.info(
+                "[OSRM-PUBLIC] Ruta a %s: %d puntos, eficiencia %.2f",
+                dest_type, len(public_coords), self.route_efficiency,
+            )
             self.routes_calculated += 1
             return True
-            
-        except Exception as e:
-            logger.error(f"Error calculando ruta: {e}")
-            self.route_geometry = []  # Sin fallback a línea recta
-            self.route_calculation_errors += 1
-            self.action_message = f"Error ruta: {str(e)[:30]}"
-            return False
+
+        # ── Sin ruta disponible: línea recta + aviso ──────────────────────────
+        logger.warning(
+            "[ROUTING] ⚠️ Sin conexión con OSRM (local ni público) — "
+            "usando ruta directa a %s. Comprueba el estado del servidor.",
+            dest_type,
+        )
+        self.route_geometry = [(lat, lon)]
+        self.routes_calculated += 1
+        return True
 
     def route_to_nearest(self, dest_type: str) -> bool:
         """

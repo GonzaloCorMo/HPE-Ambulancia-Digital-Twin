@@ -7,7 +7,7 @@ import logging
 from typing import Dict, List, Optional, Any, Tuple, Callable
 from main import launch_ambulance
 from telemetry.logistics import (
-    POIS, JAMS, MissionStatus, add_poi, add_jam, remove_jam, ensure_graph_for_area
+    POIS, JAMS, MissionStatus, add_poi, add_jam, remove_jam
 )
 
 # Distancia maxima operativa: asignaciones mas largas son rechazadas automaticamente
@@ -1009,18 +1009,6 @@ class SimulatorEngine:
             add_poi("HOSPITAL", lat, lon, name)
             self.log_network(f"[PRESET] 🏥 {name} en ({lat:.4f}, {lon:.4f})")
 
-        # Disparar descarga del grafo viario para esta ciudad (en background)
-        hospital_coords = [(lat, lon) for lat, lon, _ in preset["hospitals"]]
-        center_lat = sum(h[0] for h in hospital_coords) / len(hospital_coords)
-        center_lon = sum(h[1] for h in hospital_coords) / len(hospital_coords)
-        max_spread_km = max(
-            self._calculate_distance_km(h[0], h[1], center_lat, center_lon)
-            for h in hospital_coords
-        ) if len(hospital_coords) > 1 else 0.0
-        radius_m = max(6000, int((max_spread_km + 4.0) * 1000))
-        self.log_network(f"[PRESET] 🗺️ Preparando red viaria para {preset['name']} (r={radius_m//1000}km)...")
-        ensure_graph_for_area(center_lat, center_lon, radius_m, preset_name)
-
         # Cargar gasolineras
         for lat, lon, name in preset["gas_stations"]:
             add_poi("GAS_STATION", lat, lon, name)
@@ -1108,7 +1096,7 @@ class SimulatorEngine:
                     continue
 
                 try:
-                    sleep_s = random.uniform(20.0, 30.0) / max(1, self.speed_multiplier)
+                    sleep_s = random.uniform(45.0, 75.0) / max(1, self.speed_multiplier)
                     time.sleep(sleep_s)
 
                     if not self.is_simulating or not self.running:
@@ -1148,7 +1136,7 @@ class SimulatorEngine:
 
     def _auto_jam_loop(self) -> None:
         """Genera y elimina atascos aleatorios cerca de hospitales."""
-        MAX_JAMS = 3
+        MAX_JAMS = 2
         JAM_CAUSES = [
             "accidente de tráfico",
             "obras en calzada",
@@ -1196,7 +1184,7 @@ class SimulatorEngine:
                             f"— severidad {severity:.0%}, duración ~{duration_s/60:.1f} min"
                         )
 
-                wait_s = random.uniform(60.0, 120.0) / max(1, math.sqrt(self.speed_multiplier))
+                wait_s = random.uniform(100.0, 180.0) / max(1, math.sqrt(self.speed_multiplier))
                 time.sleep(wait_s)
 
         except Exception as exc:
@@ -1208,13 +1196,24 @@ class SimulatorEngine:
             self.log_network("[AUTO-JAM] Hilo de atascos automáticos finalizado.")
 
     def _generate_random_coords_near_pois(self, radius_km: float = 10.0) -> Optional[Tuple[float, float]]:
-        """Genera coordenadas aleatorias cerca de un hospital existente en el mapa."""
+        """Genera coordenadas aleatorias cerca de los hospitales existentes en el mapa.
+        
+        - 70% del tiempo usa el centroide de todos los hospitales como centro,
+          reduciendo la correlación entre número de hospitales y densidad de eventos.
+        - 30% del tiempo elige un hospital al azar para mantener cierta correlación geográfica.
+        """
         hospitals = [p for p in POIS if p.get("type") == "HOSPITAL"]
         if not hospitals:
             return None
 
-        center = random.choice(hospitals)
-        center_lat, center_lon = center["lat"], center["lon"]
+        if random.random() < 0.70:
+            # Centroide del conjunto de hospitales (independiente del número)
+            center_lat = sum(h["lat"] for h in hospitals) / len(hospitals)
+            center_lon = sum(h["lon"] for h in hospitals) / len(hospitals)
+        else:
+            # Hospital individual al azar (correlación débil con la distribución real)
+            center = random.choice(hospitals)
+            center_lat, center_lon = center["lat"], center["lon"]
         R = 6371.0
 
         distance_km = random.uniform(0.5, radius_km)
