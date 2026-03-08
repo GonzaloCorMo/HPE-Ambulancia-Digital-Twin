@@ -1030,6 +1030,28 @@ if (btnClear) {
     });
 }
 
+const btnAutoSim = document.getElementById('btn-auto-sim');
+if (btnAutoSim) {
+    btnAutoSim.addEventListener('click', () => {
+        if (!confirm('¿Iniciar simulación autónoma de Madrid?\n\nSe desplegarán:\n• 3 hospitales reales (La Paz, Gregorio Marañón, 12 de Octubre)\n• 2 gasolineras estratégicas\n• 4 ambulancias operativas\n\nSe generarán emergencias automáticas cada 20-30 s\ny anomalías IA cada 2 min.')) return;
+        btnAutoSim.disabled = true;
+        btnAutoSim.textContent = '⏳ Iniciando...';
+        postJson('/api/auto_simulation', {})
+            .then(data => {
+                addTerminalLog('[AUTO-SIM] 🤖 Simulación autónoma de Madrid iniciada.');
+                if (data.message) addTerminalLog(`[AUTO-SIM] ${data.message}`);
+            })
+            .catch(e => {
+                addTerminalLog(`[ERROR] No se pudo iniciar la simulación autónoma: ${e.message}`);
+            })
+            .finally(() => {
+                btnAutoSim.disabled = false;
+                btnAutoSim.innerHTML = '<i class="fas fa-robot"></i><span>🤖 SIMULACIÓN AUTÓNOMA</span>';
+            });
+        addTerminalLog('[AUTO-SIM] Solicitando simulación autónoma al servidor...');
+    });
+}
+
 if (sliderSpeed) {
     sliderSpeed.addEventListener('input', (e) => {
         postJson('/api/control/speed', { multiplier: parseInt(e.target.value) });
