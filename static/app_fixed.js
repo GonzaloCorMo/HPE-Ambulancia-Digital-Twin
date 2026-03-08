@@ -1024,32 +1024,53 @@ if (btnAutoSim) {
     });
 }
 
+// Preset multi-select state
+const selectedPresets = new Set();
+
+function updatePresetDropdownLabel() {
+    const label = document.getElementById('preset-dropdown-label');
+    const badge = document.getElementById('preset-count-badge');
+    if (!label) return;
+    if (selectedPresets.size === 0) {
+        label.textContent = '-- Seleccionar Presets --';
+        badge?.classList.add('hidden');
+    } else if (selectedPresets.size === 1) {
+        const key = [...selectedPresets][0];
+        const opt = document.querySelector(`#preset-dropdown-panel [data-key="${key}"] span.preset-name`);
+        label.textContent = opt ? opt.textContent : key;
+        badge?.classList.add('hidden');
+    } else {
+        label.textContent = `${selectedPresets.size} presets seleccionados`;
+        if (badge) { badge.textContent = selectedPresets.size; badge.classList.remove('hidden'); }
+    }
+}
+
 // Preset loader
 const btnLoadPreset = document.getElementById('btn-load-preset');
-const presetSelector = document.getElementById('preset-selector');
-if (btnLoadPreset && presetSelector) {
+if (btnLoadPreset) {
     btnLoadPreset.addEventListener('click', () => {
-        const presetName = presetSelector.value;
-        if (!presetName) {
-            addTerminalLog('[SISTEMA] Selecciona un preset del desplegable.');
+        if (selectedPresets.size === 0) {
+            addTerminalLog('[SISTEMA] Selecciona al menos un preset del desplegable.');
             return;
         }
-        if (!confirm(`¿Cargar preset "${presetName}"?\n\nSe limpiará el escenario actual y se cargará la infraestructura del preset.`)) return;
+        const names = [...selectedPresets];
+        const namesStr = names.join(', ');
+        if (!confirm(`¿Cargar preset(s): "${namesStr}"?\n\nSe limpiará el escenario actual y se cargará la infraestructura seleccionada.`)) return;
         btnLoadPreset.disabled = true;
-        addTerminalLog(`[PRESET] Cargando preset "${presetName}"...`);
-        postJson('/api/preset', { name: presetName })
+        addTerminalLog(`[PRESET] Cargando presets: ${namesStr}...`);
+        const payload = names.length === 1
+            ? { name: names[0] }
+            : { names, clear_first: true };
+        const url = names.length === 1 ? '/api/preset' : '/api/presets/load_multi';
+        postJson(url, payload)
             .then(data => {
                 if (data.status === 'loaded') {
                     addTerminalLog(`[PRESET] ✅ ${data.message}`);
                     if (data.ambulances) addTerminalLog(`[PRESET] ${data.ambulances} ambulancias desplegadas.`);
                 }
             })
-            .catch(e => {
-                addTerminalLog(`[ERROR] No se pudo cargar el preset: ${e.message}`);
-            })
-            .finally(() => {
-                btnLoadPreset.disabled = false;
-            });
+            .catch(e => addTerminalLog(`[ERROR] No se pudo cargar el preset: ${e.message}`))
+            .finally(() => { btnLoadPreset.disabled = false; });
     });
 }
 
@@ -1058,6 +1079,23 @@ if (sliderSpeed) {
         postJson('/api/control/speed', { multiplier: parseInt(e.target.value) });
         addTerminalLog(`[CONTROL] Velocidad ajustada a ${e.target.value}x`);
     });
+}
+
+// Severity (event frequency) slider
+const sliderSeverity = document.getElementById('slider-severity');
+const severityLabel = document.getElementById('severity-label');
+if (sliderSeverity) {
+    // Convert slider integer 1-50 to float multiplier 0.1-5.0
+    function sliderToSeverity(v) { return Math.round(v / 10 * 10) / 10; }
+    sliderSeverity.addEventListener('input', (e) => {
+        const mult = sliderToSeverity(parseInt(e.target.value));
+        if (severityLabel) severityLabel.textContent = `${mult.toFixed(1)}x`;
+        postJson('/api/control/severity', { multiplier: mult })
+            .then(() => addTerminalLog(`[CONTROL] Severidad de eventos ajustada a ${mult.toFixed(1)}x`));
+    });
+    // Set initial label
+    const initMult = sliderToSeverity(parseInt(sliderSeverity.value));
+    if (severityLabel) severityLabel.textContent = `${initMult.toFixed(1)}x`;
 }
 
 // Network toggles
@@ -1141,11 +1179,19 @@ map.on('click', function (e) {
 });
 
 map.on('contextmenu', function (e) {
-    if (getDrawMode() === 'PAN') return;
+    // Right-click always attempts deletion regardless of current draw mode
+    e.originalEvent.preventDefault();
     
-    postJson('/api/delete', { lat: e.latlng.lat, lon: e.latlng.lng });
-    addTerminalLog(`[ELIMINACIÓN] Entidad eliminada cerca de (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`);
-    return false; // Prevent default context menu
+    postJson('/api/delete', { lat: e.latlng.lat, lon: e.latlng.lng })
+        .then(data => {
+            if (data.status === 'deleted') {
+                addTerminalLog(`[ELIMINACIÓN] ${data.type} eliminado cerca de (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`);
+            } else {
+                addTerminalLog(`[MAPA] No se encontró entidad en (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`);
+            }
+        })
+        .catch(err => addTerminalLog(`[ERROR] Fallo al eliminar: ${err.message}`));
+    return false;
 });
 
 // City Search Logic
@@ -1817,15 +1863,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // Setup quick actions
     setupQuickActions();
     
-    // Populate preset selector from API
+    // Populate preset selector (multi-select dropdown) from API
     fetch('/api/presets')
         .then(r => r.ok ? r.json() : Promise.reject(r.status))
         .then(data => {
             if (!data.presets) return;
-            const sel = document.getElementById('preset-selector');
-            if (!sel) return;
-            // Clear existing options except placeholder
-            sel.innerHTML = '<option value="">-- Seleccionar Preset --</option>';
+            const panel = document.getElementById('preset-dropdown-panel');
+            if (!panel) return;
             const FLAG_MAP = {
                 madrid: '\uD83C\uDDEA\uD83C\uDDF8',
                 barcelona: '\uD83C\uDDEA\uD83C\uDDF8',
@@ -1838,23 +1882,59 @@ document.addEventListener('DOMContentLoaded', () => {
                 medellin: '\uD83C\uDDE8\uD83C\uDDF4',
                 cali: '\uD83C\uDDE8\uD83C\uDDF4',
             };
+            panel.innerHTML = '';
             Object.entries(data.presets).forEach(([key, info]) => {
-                const opt = document.createElement('option');
-                opt.value = key;
                 const flag = FLAG_MAP[key] || '\uD83C\uDF0D';
-                opt.textContent = `${flag} ${info.name}`;
-                sel.appendChild(opt);
+                const item = document.createElement('label');
+                item.dataset.key = key;
+                item.className = 'flex items-center gap-2 px-3 py-2 hover:bg-blue-50 cursor-pointer text-sm text-slate-700';
+                item.innerHTML = `
+                    <input type="checkbox" value="${key}" class="preset-checkbox w-4 h-4 accent-blue-600 rounded">
+                    <span class="preset-name">${flag} ${info.name}</span>
+                    <span class="ml-auto text-xs text-slate-400">${info.ambulances} 🚑 · ${info.hospitals} 🏥</span>
+                `;
+                item.querySelector('input').addEventListener('change', (ev) => {
+                    if (ev.target.checked) selectedPresets.add(key); else selectedPresets.delete(key);
+                    updatePresetDropdownLabel();
+                });
+                panel.appendChild(item);
             });
         })
         .catch(() => {
-            // Fallback: static option for Madrid
-            const sel = document.getElementById('preset-selector');
-            if (sel && sel.options.length <= 1) {
-                const opt = document.createElement('option');
-                opt.value = 'madrid'; opt.textContent = '\uD83C\uDDEA\uD83C\uDDF8 Madrid';
-                sel.appendChild(opt);
+            // Fallback static option
+            const panel = document.getElementById('preset-dropdown-panel');
+            if (panel && panel.children.length === 0) {
+                const item = document.createElement('label');
+                item.dataset.key = 'madrid';
+                item.className = 'flex items-center gap-2 px-3 py-2 hover:bg-blue-50 cursor-pointer text-sm text-slate-700';
+                item.innerHTML = '<input type="checkbox" value="madrid" class="preset-checkbox w-4 h-4 accent-blue-600 rounded"><span class="preset-name">\uD83C\uDDEA\uD83C\uDDF8 Madrid</span>';
+                item.querySelector('input').addEventListener('change', (ev) => {
+                    if (ev.target.checked) selectedPresets.add('madrid'); else selectedPresets.delete('madrid');
+                    updatePresetDropdownLabel();
+                });
+                panel.appendChild(item);
             }
         });
+
+    // Toggle dropdown open/close
+    const ddToggle = document.getElementById('preset-dropdown-toggle');
+    const ddPanel = document.getElementById('preset-dropdown-panel');
+    const ddArrow = document.getElementById('preset-dropdown-arrow');
+    if (ddToggle && ddPanel) {
+        ddToggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = !ddPanel.classList.contains('hidden');
+            ddPanel.classList.toggle('hidden', isOpen);
+            ddArrow?.classList.toggle('rotate-180', !isOpen);
+        });
+        // Close when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!document.getElementById('preset-dropdown-container')?.contains(e.target)) {
+                ddPanel.classList.add('hidden');
+                ddArrow?.classList.remove('rotate-180');
+            }
+        });
+    }
 
     // Add initial log
     addTerminalLog('[SISTEMA] Centro de Control Digital Twin inicializado');

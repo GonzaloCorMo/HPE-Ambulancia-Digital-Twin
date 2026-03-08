@@ -174,6 +174,15 @@ class PresetRequest(BaseModel):
     """Modelo para carga de preset de escenario."""
     name: str = Field(..., description="Nombre del preset")
 
+class MultiPresetRequest(BaseModel):
+    """Modelo para carga múltiple de presets de escenario."""
+    names: List[str] = Field(..., description="Lista de nombres de presets a cargar")
+    clear_first: bool = Field(True, description="Limpiar el escenario antes de cargar")
+
+class SeverityRequest(BaseModel):
+    """Modelo para ajuste de severidad de eventos autónomos."""
+    multiplier: float = Field(..., ge=0.1, le=10.0, description="Multiplicador de frecuencia de eventos (0.1-10)")
+
 class IncidentRequest(BaseModel):
     """Modelo para inyección de incidentes."""
     ambulance_id: str = Field(..., description="ID de ambulancia")
@@ -312,9 +321,10 @@ async def api_delete(req: DeleteRequest):
     try:
         # Buscar ambulancia
         for am_id, amb in list(engine.ambulances.items()):
-            if (hasattr(amb.logistics, 'lat') and hasattr(amb.logistics, 'lon')):
-                amb_lat = amb.logistics.lat
-                amb_lon = amb.logistics.lon
+            # Support both .lat/.lon and .latitude/.longitude attribute naming
+            amb_lat = getattr(amb.logistics, 'lat', None) or getattr(amb.logistics, 'latitude', None)
+            amb_lon = getattr(amb.logistics, 'lon', None) or getattr(amb.logistics, 'longitude', None)
+            if amb_lat is not None and amb_lon is not None:
                 if (abs(amb_lat - lat) < threshold and abs(amb_lon - lon) < threshold):
                     if hasattr(amb, 'stop'):
                         amb.stop()
@@ -339,6 +349,18 @@ async def api_delete(req: DeleteRequest):
                     "status": "deleted",
                     "type": "poi",
                     "poi_type": poi.get("type"),
+                    "location": {"lat": lat, "lon": lon}
+                }
+        
+        # Buscar emergencia activa
+        for em_id, em in list(engine.active_emergencies.items()):
+            if abs(em.get("lat", 999) - lat) < threshold and abs(em.get("lon", 999) - lon) < threshold:
+                del engine.active_emergencies[em_id]
+                engine.log_network(f"[SISTEMA] 💥 Emergencia {em_id[:8]} eliminada.")
+                return {
+                    "status": "deleted",
+                    "type": "emergency",
+                    "id": em_id,
                     "location": {"lat": lat, "lon": lon}
                 }
         
@@ -942,6 +964,53 @@ async def api_load_preset(req: PresetRequest):
             raise HTTPException(status_code=500, detail="Error cargando preset")
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/presets/load_multi", status_code=200)
+async def api_load_multi_preset(req: MultiPresetRequest):
+    """Carga múltiples presets de escenario simultáneamente."""
+    try:
+        available = list(SCENARIO_PRESETS.keys())
+        invalid = [n for n in req.names if n not in SCENARIO_PRESETS]
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Presets no encontrados: {invalid}. Disponibles: {available}"
+            )
+        if not req.names:
+            raise HTTPException(status_code=400, detail="Debe seleccionar al menos un preset")
+
+        loaded = []
+        for i, name in enumerate(req.names):
+            if i == 0 and req.clear_first:
+                success = engine.load_preset(name)  # clears first
+            else:
+                success = engine.load_preset_additive(name)  # additive
+            if success:
+                loaded.append(name)
+
+        return {
+            "status": "loaded",
+            "presets": loaded,
+            "message": f"{len(loaded)} preset(s) cargados: {', '.join(loaded)}",
+            "ambulances": len(engine.ambulances),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/control/severity", status_code=200)
+async def api_set_severity(req: SeverityRequest):
+    """Ajusta el multiplicador de frecuencia de eventos de simulación autónoma."""
+    try:
+        engine.set_event_severity(req.multiplier)
+        return {
+            "status": "updated",
+            "multiplier": req.multiplier,
+            "message": f"Frecuencia de eventos ajustada a {req.multiplier:.1f}x"
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

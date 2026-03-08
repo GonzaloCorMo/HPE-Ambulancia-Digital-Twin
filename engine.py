@@ -207,6 +207,7 @@ class SimulatorEngine:
         self.is_simulating = False
         
         self.speed_multiplier = 1
+        self.event_severity = 1.0  # Multiplier for auto-sim event frequency (0.2–5.0)
         self.mqtt_on = True
         self.p2p_on = True
         self.http_on = True
@@ -685,14 +686,36 @@ class SimulatorEngine:
             ambulance.logistics.action_message = "Disponible para nuevas asignaciones"
 
     def _manage_idle_ambulances(self) -> None:
-        """Gestiona ambulancias sin asignación."""
+        """Gestiona ambulancias sin asignación.
+
+        Para evitar que todas las ambulancias inactivas de una misma ciudad
+        confluyan en el mismo hospital (apareciendo como un único icono en el mapa),
+        distribuye las ambulancias entre los hospitales de su área operativa: cada
+        ambulancia es enviada al hospital local con menor número de ambulancias
+        asignadas actualmente.
+        """
         if not self.is_simulating:
             return
         
         hospitals = [p for p in POIS if p.get("type") == "HOSPITAL"]
         if not hospitals:
             return
-        
+
+        # Contar ambulancias cuyo destino actual es cada hospital (para balancear)
+        hospital_load: Dict[Tuple[float, float], int] = {
+            (h["lat"], h["lon"]): 0 for h in hospitals
+        }
+        for amb in self.ambulances.values():
+            dest = getattr(amb.logistics, 'destination', None)
+            dest_type = getattr(amb.logistics, 'destination_type', None)
+            if dest and dest_type in ("BASE", "HOSPITAL"):
+                key = (round(dest[0], 4), round(dest[1], 4))
+                closest_key = min(
+                    hospital_load.keys(),
+                    key=lambda k: abs(k[0] - dest[0]) + abs(k[1] - dest[1])
+                )
+                hospital_load[closest_key] = hospital_load.get(closest_key, 0) + 1
+
         for ambulance in self.ambulances.values():
             # Solo ambulancias activas sin destino y con combustible >= 30%.
             # Las de bajo combustible son gestionadas por _manage_proactive_refueling.
@@ -721,20 +744,34 @@ class SimulatorEngine:
                             break
                 
                 if not at_hospital:
-                    # Enrutar al hospital más cercano
-                    nearest_hospital = min(
-                        hospitals,
-                        key=lambda h: self._calculate_distance_km(
-                            ambulance.logistics.lat, ambulance.logistics.lon,
-                            h["lat"], h["lon"]
+                    amb_lat = getattr(ambulance.logistics, 'lat', 0.0)
+                    amb_lon = getattr(ambulance.logistics, 'lon', 0.0)
+
+                    # Candidatos: solo hospitales dentro del área operativa de la ambulancia
+                    local_hospitals = [
+                        h for h in hospitals
+                        if self._calculate_distance_km(amb_lat, amb_lon, h["lat"], h["lon"])
+                           <= MAX_OPERATIONAL_DISTANCE_KM
+                    ]
+                    if not local_hospitals:
+                        local_hospitals = hospitals  # fallback
+
+                    # Elegir el hospital local con menor carga de ambulancias en route
+                    target_hospital = min(
+                        local_hospitals,
+                        key=lambda h: (
+                            hospital_load.get((h["lat"], h["lon"]), 0),
+                            self._calculate_distance_km(amb_lat, amb_lon, h["lat"], h["lon"])
                         )
                     )
-                    
+
                     if hasattr(ambulance.logistics, 'set_destination'):
                         ambulance.logistics.set_destination(
-                            nearest_hospital["lat"], nearest_hospital["lon"], "BASE"
+                            target_hospital["lat"], target_hospital["lon"], "BASE"
                         )
                         ambulance.logistics.action_message = "Regresando a Base"
+                        hospital_load[(target_hospital["lat"], target_hospital["lon"])] = \
+                            hospital_load.get((target_hospital["lat"], target_hospital["lon"]), 0) + 1
 
     def _manage_proactive_refueling(self) -> None:
         """
@@ -989,6 +1026,11 @@ class SimulatorEngine:
     # PRESETS Y SIMULACIÓN AUTÓNOMA
     # ------------------------------------------------------------------
 
+    def set_event_severity(self, multiplier: float) -> None:
+        """Ajusta el multiplicador de frecuencia de eventos autónomos (0.2–5.0)."""
+        self.event_severity = max(0.1, min(10.0, float(multiplier)))
+        self.log_network(f"[AUTO-SIM] Severidad de eventos ajustada a {self.event_severity:.1f}x")
+
     def load_preset(self, preset_name: str) -> bool:
         """
         Carga un preset de escenario (hospitales, gasolineras, ambulancias).
@@ -1024,6 +1066,41 @@ class SimulatorEngine:
 
         self.log_network(
             f"[SISTEMA] ✅ Preset '{preset['name']}' cargado: "
+            f"{len(preset['hospitals'])} hospitales, "
+            f"{len(preset['gas_stations'])} gasolineras, "
+            f"{len(preset['ambulance_positions'])} ambulancias."
+        )
+        return True
+
+    def load_preset_additive(self, preset_name: str) -> bool:
+        """
+        Carga un preset de escenario de forma aditiva (sin limpiar el escenario actual).
+        Permite cargar múltiples presets simultáneamente.
+        """
+        if preset_name not in SCENARIO_PRESETS:
+            self.log_network(f"[SISTEMA] Preset '{preset_name}' no encontrado.")
+            return False
+
+        preset = SCENARIO_PRESETS[preset_name]
+        self.log_network(f"[SISTEMA] Añadiendo preset: {preset['name']}...")
+
+        for lat, lon, name in preset["hospitals"]:
+            add_poi("HOSPITAL", lat, lon, name)
+            self.log_network(f"[PRESET] 🏥 {name} en ({lat:.4f}, {lon:.4f})")
+
+        for lat, lon, name in preset["gas_stations"]:
+            add_poi("GAS_STATION", lat, lon, name)
+            self.log_network(f"[PRESET] ⛽ {name} en ({lat:.4f}, {lon:.4f})")
+
+        for lat, lon in preset["ambulance_positions"]:
+            try:
+                am_id = self.spawn_ambulance(lat, lon)
+                self.log_network(f"[PRESET] 🚑 {am_id} en ({lat:.4f}, {lon:.4f})")
+            except Exception as e:
+                logger.warning(f"[PRESET] Error desplegando ambulancia: {e}")
+
+        self.log_network(
+            f"[SISTEMA] ✅ Preset '{preset['name']}' añadido: "
             f"{len(preset['hospitals'])} hospitales, "
             f"{len(preset['gas_stations'])} gasolineras, "
             f"{len(preset['ambulance_positions'])} ambulancias."
@@ -1096,7 +1173,7 @@ class SimulatorEngine:
                     continue
 
                 try:
-                    sleep_s = random.uniform(45.0, 75.0) / max(1, self.speed_multiplier)
+                    sleep_s = random.uniform(45.0, 75.0) / max(1, self.speed_multiplier) / max(0.1, self.event_severity)
                     time.sleep(sleep_s)
 
                     if not self.is_simulating or not self.running:
@@ -1136,7 +1213,7 @@ class SimulatorEngine:
 
     def _auto_jam_loop(self) -> None:
         """Genera y elimina atascos aleatorios cerca de hospitales."""
-        MAX_JAMS = 2
+        MAX_JAMS = max(2, round(2 * self.event_severity))
         JAM_CAUSES = [
             "accidente de tráfico",
             "obras en calzada",
@@ -1184,7 +1261,7 @@ class SimulatorEngine:
                             f"— severidad {severity:.0%}, duración ~{duration_s/60:.1f} min"
                         )
 
-                wait_s = random.uniform(100.0, 180.0) / max(1, math.sqrt(self.speed_multiplier))
+                wait_s = random.uniform(100.0, 180.0) / max(1, math.sqrt(self.speed_multiplier)) / max(0.1, self.event_severity)
                 time.sleep(wait_s)
 
         except Exception as exc:
@@ -1197,23 +1274,46 @@ class SimulatorEngine:
 
     def _generate_random_coords_near_pois(self, radius_km: float = 10.0) -> Optional[Tuple[float, float]]:
         """Genera coordenadas aleatorias cerca de los hospitales existentes en el mapa.
-        
-        - 70% del tiempo usa el centroide de todos los hospitales como centro,
-          reduciendo la correlación entre número de hospitales y densidad de eventos.
-        - 30% del tiempo elige un hospital al azar para mantener cierta correlación geográfica.
+
+        Agrupa los hospitales en clústeres geográficos (radio ~200 km) para que,
+        cuando haya múltiples presets de ciudades lejanas cargados simultáneamente
+        (p.ej. Madrid + Barcelona + Ciudad de México), los eventos se distribuyan de
+        forma equitativa entre todas las ciudades y nunca aparezcan en el océano
+        (como ocurriría al usar el centroide global de todos los hospitales).
+
+        Algoritmo:
+          1. Clusterizar hospitales: cada nuevo hospital se añade al primer clúster
+             cuyo centroide se encuentre a ≤ CLUSTER_RADIUS_KM; si no hay ninguno,
+             abre un nuevo clúster.
+          2. Elegir un clúster al azar (distribución uniforme entre ciudades).
+          3. Elegir un hospital al azar dentro del clúster.
+          4. Generar un punto aleatorio a ≤ radius_km del hospital elegido.
         """
         hospitals = [p for p in POIS if p.get("type") == "HOSPITAL"]
         if not hospitals:
             return None
 
-        if random.random() < 0.70:
-            # Centroide del conjunto de hospitales (independiente del número)
-            center_lat = sum(h["lat"] for h in hospitals) / len(hospitals)
-            center_lon = sum(h["lon"] for h in hospitals) / len(hospitals)
-        else:
-            # Hospital individual al azar (correlación débil con la distribución real)
-            center = random.choice(hospitals)
-            center_lat, center_lon = center["lat"], center["lon"]
+        # Agrupar hospitales en clústeres geográficos (una entrada por ciudad/área)
+        CLUSTER_RADIUS_KM = 200.0
+        clusters: List[List[Dict]] = []
+        for h in hospitals:
+            placed = False
+            for cluster in clusters:
+                # Centroide aproximado del clúster
+                clat = sum(m["lat"] for m in cluster) / len(cluster)
+                clon = sum(m["lon"] for m in cluster) / len(cluster)
+                if self._calculate_distance_km(h["lat"], h["lon"], clat, clon) <= CLUSTER_RADIUS_KM:
+                    cluster.append(h)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([h])
+
+        # Elegir un clúster al azar (1 voto por ciudad, sin importar cuántos hospitales tenga)
+        chosen_cluster = random.choice(clusters)
+        center = random.choice(chosen_cluster)
+        center_lat, center_lon = center["lat"], center["lon"]
+
         R = 6371.0
 
         distance_km = random.uniform(0.5, radius_km)
