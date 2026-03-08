@@ -166,6 +166,7 @@ class VitalsEngine:
         """
         if not self.has_patient:
             return {
+                "has_patient": False,
                 "heart_rate": 0,
                 "blood_pressure": "0/0",
                 "mean_arterial_pressure": 0,
@@ -207,6 +208,7 @@ class VitalsEngine:
             ecg_rhythm = ECG_Rhythm.ATRIAL_FIBRILLATION
 
         return {
+            "has_patient": True,
             "heart_rate": int(self.heart_rate),
             "blood_pressure": f"{int(self.blood_pressure_sys)}/{int(self.blood_pressure_dia)}",
             "mean_arterial_pressure": round(self.mean_arterial_pressure, 1),

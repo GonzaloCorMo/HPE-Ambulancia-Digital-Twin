@@ -395,6 +395,7 @@ const btnPlay = document.getElementById('btn-play');
 const speedLabel = document.getElementById('speed-label');
 const sliderSpeed = document.getElementById('slider-speed');
 const terminalLogs = document.getElementById('terminal-logs');
+let visibleLogCount = 0;
 const connStatus = document.getElementById('connection-status');
 const statsContainer = document.getElementById('stats-container');
 
@@ -507,17 +508,83 @@ setInterval(() => {
     }
 }, 10000);
 
+// ── Signal Monitor filter & render ─────────────────────────────────────────
+const _SIGNAL_NOISE_PATTERNS = [
+    /\] → MQTT \|/,
+    /\] → P2P BROADCAST \|/,
+    /^HTTP POST to https?:\/\//,
+    /^HTTP POST https?:\/\/.*\s2\d\d/,
+    /\[HTTPS\] Backup sync/,
+    /\] → HTTP \| Backup/,
+];
+
+const _SIGNAL_CATEGORIES = [
+    { pattern: /\[URGENCIA|🚨/,                           label: 'URGENCIA',  bg: '#dc2626', fg: '#ffffff' },
+    { pattern: /\[ERROR\]/,                              label: 'ERROR',     bg: '#ef4444', fg: '#ffffff' },
+    { pattern: /⚠️|ADVERTENCIA|\[MQTT\].*[Dd]esconex/,   label: 'AVISO',     bg: '#d97706', fg: '#ffffff' },
+    { pattern: /\[AUTO-SIM\]/,                           label: 'AUTO-SIM',  bg: '#7c3aed', fg: '#ffffff' },
+    { pattern: /\[CONTROL\]/,                            label: 'CONTROL',   bg: '#2563eb', fg: '#ffffff' },
+    { pattern: /\[MAPA\]/,                               label: 'MAPA',      bg: '#0d9488', fg: '#ffffff' },
+    { pattern: /\[SISTEMA\]|\[API\]|\[SERVER\]/,         label: 'SISTEMA',   bg: '#475569', fg: '#e2e8f0' },
+];
+
 function addTerminalLog(message) {
     if (!terminalLogs) return;
-    
-    const t = formatTime(new Date());
-    terminalLogs.textContent += `[${t}] ${message}\n`;
-    terminalLogs.scrollTop = terminalLogs.scrollHeight;
 
-    // Prevent giant memory consumption
-    if (terminalLogs.textContent.length > 10000) {
-        terminalLogs.textContent = terminalLogs.textContent.substring(5000);
+    // Discard noisy repetitive messages
+    for (const re of _SIGNAL_NOISE_PATTERNS) {
+        if (re.test(message)) return;
     }
+
+    // Clear initial placeholder HTML on first real entry
+    if (visibleLogCount === 0) {
+        terminalLogs.innerHTML = '';
+    }
+
+    // Determine category
+    let label = 'INFO';
+    let bg    = '#059669';
+    let fg    = '#ffffff';
+    for (const cat of _SIGNAL_CATEGORIES) {
+        if (cat.pattern.test(message)) {
+            label = cat.label; bg = cat.bg; fg = cat.fg;
+            break;
+        }
+    }
+
+    // Build DOM entry (textContent only — XSS-safe)
+    const entry = document.createElement('div');
+    entry.style.cssText = 'display:flex;align-items:baseline;gap:6px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.04);';
+
+    const timeSpan = document.createElement('span');
+    timeSpan.style.cssText = 'flex-shrink:0;color:#94a3b8;font-size:10px;';
+    timeSpan.textContent = formatTime(new Date());
+
+    const badge = document.createElement('span');
+    badge.style.cssText = `flex-shrink:0;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:${bg};color:${fg};text-transform:uppercase;letter-spacing:.4px;`;
+    badge.textContent = label;
+
+    const msgSpan = document.createElement('span');
+    msgSpan.style.cssText = 'flex:1;color:#d1fae5;word-break:break-word;';
+    msgSpan.textContent = message;
+
+    entry.appendChild(timeSpan);
+    entry.appendChild(badge);
+    entry.appendChild(msgSpan);
+    terminalLogs.appendChild(entry);
+
+    // Cap at 200 entries
+    visibleLogCount++;
+    if (visibleLogCount > 200) {
+        terminalLogs.removeChild(terminalLogs.firstChild);
+        visibleLogCount--;
+    }
+
+    // Update count badge
+    const countEl = document.getElementById('log-count');
+    if (countEl) countEl.textContent = visibleLogCount;
+
+    terminalLogs.scrollTop = terminalLogs.scrollHeight;
 }
 
 function updateAllStats(state) {
@@ -689,6 +756,13 @@ function updateFleetUI() {
     
     if (DEBUG) console.log('Current DOM IDs:', currentDomIds, 'State ambulance IDs:', stateAmIds);
 
+    // Remove placeholder div (no data-am-id) if there are ambulances to show
+    if (stateAmIds.length > 0) {
+        Array.from(fleetContainer.children).forEach(child => {
+            if (!child.dataset.amId) child.remove();
+        });
+    }
+
     // Remove deleted
     currentDomIds.filter(id => !stateAmIds.includes(id)).forEach(id => {
         const el = document.getElementById(`card-${id}`);
@@ -766,19 +840,19 @@ function updateFleetUI() {
                 </div>
             `;
             
-            // Modal hooking
+            // Modal hooking: open full telemetry modal on card/title click
             const titleEl = card.querySelector('.title-tag');
             if (titleEl) {
                 titleEl.addEventListener('click', (e) => {
                     e.preventDefault();
-                    openAmbulanceDetails(amId);
+                    openTelemetryModal(amId);
                 });
             }
             
-            // Card click for quick actions
+            // Card click for full telemetry
             card.addEventListener('click', (e) => {
                 if (!e.target.closest('.title-tag')) {
-                    openAmbulanceDetails(amId);
+                    openTelemetryModal(amId);
                 }
             });
             
@@ -981,6 +1055,16 @@ if (btnPlay) {
     });
 }
 
+const btnClearLogs = document.getElementById('btn-clear-logs');
+if (btnClearLogs) {
+    btnClearLogs.addEventListener('click', () => {
+        if (terminalLogs) terminalLogs.innerHTML = '';
+        visibleLogCount = 0;
+        const countEl = document.getElementById('log-count');
+        if (countEl) countEl.textContent = '0';
+    });
+}
+
 const btnClear = document.getElementById('btn-clear');
 if (btnClear) {
     btnClear.addEventListener('click', () => { 
@@ -991,11 +1075,120 @@ if (btnClear) {
     });
 }
 
+const btnAutoSim = document.getElementById('btn-auto-sim');
+if (btnAutoSim) {
+    btnAutoSim.addEventListener('click', () => {
+        if (!confirm('¿Iniciar simulación autónoma?\n\nSe generarán emergencias y atascos de forma automática.\nRequiere que haya un preset cargado con hospitales y ambulancias.\n\nSi no has cargado un escenario, selecciona un preset primero.')) return;
+        btnAutoSim.disabled = true;
+        btnAutoSim.textContent = '⏳ Iniciando...';
+        addTerminalLog('[AUTO-SIM] Solicitando simulación autónoma al servidor...');
+        postJson('/api/auto_simulation', {})
+            .then(data => {
+                if (data.status === 'started') {
+                    addTerminalLog('[AUTO-SIM] 🤖 Simulación autónoma iniciada.');
+                    if (data.message) addTerminalLog(`[AUTO-SIM] ${data.message}`);
+                } else if (data.status === 'error') {
+                    addTerminalLog(`[AUTO-SIM] ⚠️ ${data.message}`);
+                }
+            })
+            .catch(e => {
+                addTerminalLog(`[ERROR] No se pudo iniciar la simulación autónoma: ${e.message}`);
+            })
+            .finally(() => {
+                btnAutoSim.disabled = false;
+                btnAutoSim.innerHTML = '<i class="fas fa-robot"></i><span>🤖 SIMULACIÓN AUTÓNOMA</span>';
+            });
+    });
+}
+
+// Preset multi-select state
+const selectedPresets = new Set();
+
+function updatePresetDropdownLabel() {
+    const label = document.getElementById('preset-dropdown-label');
+    const badge = document.getElementById('preset-count-badge');
+    if (!label) return;
+    if (selectedPresets.size === 0) {
+        label.textContent = '-- Seleccionar Presets --';
+        badge?.classList.add('hidden');
+    } else if (selectedPresets.size === 1) {
+        const key = [...selectedPresets][0];
+        const opt = document.querySelector(`#preset-dropdown-panel [data-key="${key}"] span.preset-name`);
+        label.textContent = opt ? opt.textContent : key;
+        badge?.classList.add('hidden');
+    } else {
+        label.textContent = `${selectedPresets.size} presets seleccionados`;
+        if (badge) { badge.textContent = selectedPresets.size; badge.classList.remove('hidden'); }
+    }
+}
+
+// Preset loader
+const btnLoadPreset = document.getElementById('btn-load-preset');
+if (btnLoadPreset) {
+    btnLoadPreset.addEventListener('click', () => {
+        if (selectedPresets.size === 0) {
+            addTerminalLog('[SISTEMA] Selecciona al menos un preset del desplegable.');
+            return;
+        }
+        const names = [...selectedPresets];
+        const namesStr = names.join(', ');
+        if (!confirm(`¿Cargar preset(s): "${namesStr}"?\n\nSe limpiará el escenario actual y se cargará la infraestructura seleccionada.`)) return;
+        btnLoadPreset.disabled = true;
+        addTerminalLog(`[PRESET] Cargando presets: ${namesStr}...`);
+        const payload = names.length === 1
+            ? { name: names[0] }
+            : { names, clear_first: true };
+        const url = names.length === 1 ? '/api/preset' : '/api/presets/load_multi';
+        postJson(url, payload)
+            .then(data => {
+                if (data.status === 'loaded') {
+                    addTerminalLog(`[PRESET] ✅ ${data.message}`);
+                    if (data.ambulances) addTerminalLog(`[PRESET] ${data.ambulances} ambulancias desplegadas.`);
+                }
+            })
+            .catch(e => addTerminalLog(`[ERROR] No se pudo cargar el preset: ${e.message}`))
+            .finally(() => { btnLoadPreset.disabled = false; });
+    });
+}
+
 if (sliderSpeed) {
     sliderSpeed.addEventListener('input', (e) => {
         postJson('/api/control/speed', { multiplier: parseInt(e.target.value) });
         addTerminalLog(`[CONTROL] Velocidad ajustada a ${e.target.value}x`);
     });
+}
+
+// Severity (event frequency) slider
+const sliderSeverity = document.getElementById('slider-severity');
+const severityLabel = document.getElementById('severity-label');
+if (sliderSeverity) {
+    // Convert slider integer 1-50 to float multiplier 0.1-5.0
+    function sliderToSeverity(v) { return Math.round(v / 10 * 10) / 10; }
+    sliderSeverity.addEventListener('input', (e) => {
+        const mult = sliderToSeverity(parseInt(e.target.value));
+        if (severityLabel) severityLabel.textContent = `${mult.toFixed(1)}x`;
+        postJson('/api/control/severity', { multiplier: mult })
+            .then(() => addTerminalLog(`[CONTROL] Frecuencia de eventos ajustada a ${mult.toFixed(1)}x`));
+    });
+    // Set initial label
+    const initMult = sliderToSeverity(parseInt(sliderSeverity.value));
+    if (severityLabel) severityLabel.textContent = `${initMult.toFixed(1)}x`;
+}
+
+// Fault frequency slider
+const sliderFaultFreq = document.getElementById('slider-fault-freq');
+const faultFreqLabel = document.getElementById('fault-freq-label');
+if (sliderFaultFreq) {
+    function sliderToFaultFreq(v) { return Math.round(v / 10 * 10) / 10; }
+    sliderFaultFreq.addEventListener('input', (e) => {
+        const mult = sliderToFaultFreq(parseInt(e.target.value));
+        if (faultFreqLabel) faultFreqLabel.textContent = `${mult.toFixed(1)}x`;
+        postJson('/api/control/fault_frequency', { multiplier: mult })
+            .then(() => addTerminalLog(`[CONTROL] Frecuencia de averías ajustada a ${mult.toFixed(1)}x`));
+    });
+    // Set initial label
+    const initFault = sliderToFaultFreq(parseInt(sliderFaultFreq.value));
+    if (faultFreqLabel) faultFreqLabel.textContent = `${initFault.toFixed(1)}x`;
 }
 
 // Network toggles
@@ -1079,11 +1272,19 @@ map.on('click', function (e) {
 });
 
 map.on('contextmenu', function (e) {
-    if (getDrawMode() === 'PAN') return;
+    // Right-click always attempts deletion regardless of current draw mode
+    e.originalEvent.preventDefault();
     
-    postJson('/api/delete', { lat: e.latlng.lat, lon: e.latlng.lng });
-    addTerminalLog(`[ELIMINACIÓN] Entidad eliminada cerca de (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`);
-    return false; // Prevent default context menu
+    postJson('/api/delete', { lat: e.latlng.lat, lon: e.latlng.lng })
+        .then(data => {
+            if (data.status === 'deleted') {
+                addTerminalLog(`[ELIMINACIÓN] ${data.type} eliminado cerca de (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`);
+            } else {
+                addTerminalLog(`[MAPA] No se encontró entidad en (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`);
+            }
+        })
+        .catch(err => addTerminalLog(`[ERROR] Fallo al eliminar: ${err.message}`));
+    return false;
 });
 
 // City Search Logic
@@ -1261,6 +1462,201 @@ document.getElementById('ambulance-modal')?.addEventListener('click', (e) => {
     if (e.target.id === 'ambulance-modal') {
         closeAmbulanceModal();
     }
+});
+
+// -------------------------------------------------------------
+// Telemetry Modal - Visualización detallada de telemetría
+// -------------------------------------------------------------
+let currentTelemetryAmbId = null;
+let _telemetryRefreshInterval = null;
+
+const telemetryModal = document.getElementById('telemetry-modal');
+
+function openTelemetryModal(ambulanceId) {
+    if (!ambulanceId || !simState.ambulances[ambulanceId]) {
+        addTerminalLog(`[ERROR] Ambulancia ${ambulanceId} no encontrada`);
+        return;
+    }
+    currentTelemetryAmbId = ambulanceId;
+    const titleEl = document.getElementById('modal-title');
+    if (titleEl) titleEl.textContent = `Telemetría – ${ambulanceId}`;
+
+    _refreshTelemetryModal();
+
+    telemetryModal.classList.remove('hidden');
+    telemetryModal.classList.add('flex');
+
+    if (_telemetryRefreshInterval) clearInterval(_telemetryRefreshInterval);
+    _telemetryRefreshInterval = setInterval(() => {
+        if (currentTelemetryAmbId && simState.ambulances[currentTelemetryAmbId]) {
+            _refreshTelemetryModal();
+        }
+    }, 500);
+}
+
+function closeTelemetryModal() {
+    telemetryModal.classList.add('hidden');
+    telemetryModal.classList.remove('flex');
+    if (_telemetryRefreshInterval) {
+        clearInterval(_telemetryRefreshInterval);
+        _telemetryRefreshInterval = null;
+    }
+    currentTelemetryAmbId = null;
+}
+
+function _refreshTelemetryModal() {
+    if (!currentTelemetryAmbId) return;
+    const amb = simState.ambulances[currentTelemetryAmbId];
+    if (!amb) return;
+    const v = amb.vitals || {};
+    const m = amb.mechanical || {};
+    const l = amb.logistics || {};
+
+    // --- Constantes Vitales ---
+    const hr = v.heart_rate || 0;
+    const elHr = document.getElementById('modal-heart-rate');
+    if (elHr) elHr.textContent = (v.has_patient && hr > 0) ? hr : '--';
+    const elHrT = document.getElementById('modal-heart-rate-trend');
+    if (elHrT) elHrT.textContent = (v.has_patient && hr > 0) ? `${hr} BPM` : '-- BPM';
+
+    const bp = v.blood_pressure || '0/0';
+    const elBp = document.getElementById('modal-blood-pressure');
+    if (elBp) elBp.textContent = v.has_patient ? bp : '--/--';
+    const elMap = document.getElementById('modal-map');
+    if (elMap) elMap.textContent = v.has_patient ? `MAP: ${v.mean_arterial_pressure ?? '--'} mmHg` : 'MAP: -- mmHg';
+
+    const spo2 = v.oxygen_level ?? 0;
+    const elO2 = document.getElementById('modal-oxygen');
+    if (elO2) elO2.textContent = v.has_patient ? `${spo2}%` : '--%';
+
+    const bodyTemp = v.body_temperature ?? 0;
+    const elTemp = document.getElementById('modal-temperature');
+    if (elTemp) elTemp.textContent = v.has_patient ? `${bodyTemp}°C` : '--°C';
+
+    // Estado paciente badge
+    const psEl = document.getElementById('modal-patient-status');
+    if (psEl) {
+        const ps = v.patient_status || 'NONE';
+        const psColors = {
+            'STABLE':   'bg-emerald-100 text-emerald-700',
+            'CRITICAL': 'bg-red-100 text-red-700',
+            'INJURED':  'bg-amber-100 text-amber-700',
+            'DECEASED': 'bg-slate-200 text-slate-600',
+            'NONE':     'bg-slate-100 text-slate-500'
+        };
+        psEl.textContent = v.has_patient ? ps : 'SIN PACIENTE';
+        psEl.className = `px-3 py-1 rounded-full text-xs font-bold ${psColors[ps] || psColors['NONE']}`;
+    }
+
+    const elEcg = document.getElementById('modal-ecg');
+    if (elEcg) elEcg.textContent = v.has_patient ? (v.ecg_rhythm || '--') : '--';
+    const elGcs = document.getElementById('modal-gcs');
+    if (elGcs) elGcs.textContent = v.has_patient ? (v.glasgow_coma_scale ?? '--') : '--';
+    const elPain = document.getElementById('modal-pain');
+    if (elPain) elPain.textContent = v.has_patient ? (v.pain_level ?? '--') : '--';
+
+    // --- Estado Mecánico ---
+    const fuel = m.fuel_level ?? 0;
+    const elFuelPct = document.getElementById('modal-fuel-percent');
+    if (elFuelPct) elFuelPct.textContent = `${fuel.toFixed(1)}%`;
+    const elFuelBar = document.getElementById('modal-fuel-bar');
+    if (elFuelBar) {
+        elFuelBar.style.width = `${Math.max(0, Math.min(100, fuel))}%`;
+        elFuelBar.className = `h-2.5 rounded-full ${fuel < 20 ? 'bg-red-500' : fuel < 40 ? 'bg-amber-400' : 'bg-amber-500'}`;
+    }
+    const elFuelDist = document.getElementById('modal-fuel-distance');
+    if (elFuelDist) elFuelDist.textContent = `Distancia restante: ~${Math.round((fuel / 100) * 600)} km`;
+
+    const battery = m.battery_level ?? 0;
+    const elBatPct = document.getElementById('modal-battery-percent');
+    if (elBatPct) elBatPct.textContent = `${battery.toFixed(1)}%`;
+    const elBatBar = document.getElementById('modal-battery-bar');
+    if (elBatBar) {
+        elBatBar.style.width = `${Math.max(0, Math.min(100, battery))}%`;
+        elBatBar.className = `h-2.5 rounded-full ${battery < 20 ? 'bg-red-500' : 'bg-emerald-500'}`;
+    }
+    const elVolt = document.getElementById('modal-battery-voltage');
+    if (elVolt) elVolt.textContent = `Voltaje: ${(m.alternator_voltage ?? 0).toFixed(1)} V`;
+
+    // Neumáticos
+    const tires = m.tire_pressure || [0, 0, 0, 0];
+    ['modal-tire-fl','modal-tire-fr','modal-tire-rl','modal-tire-rr'].forEach((id, i) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const psi = tires[i] ?? 0;
+        el.textContent = psi.toFixed(1);
+        el.className = `text-xl font-bold ${
+            psi < 25 ? 'text-red-600' : psi < 30 ? 'text-amber-500' : 'text-slate-800'
+        }`;
+    });
+
+    // Temperatura motor
+    const engT = m.engine_temperature ?? 0;
+    const elEngT = document.getElementById('modal-engine-temp');
+    if (elEngT) elEngT.textContent = engT.toFixed(1);
+    const elEngTs = document.getElementById('modal-engine-temp-status');
+    if (elEngTs) {
+        elEngTs.textContent = engT > 110 ? '⚠️ Sobrecalentamiento' : engT > 100 ? 'Caliente' : 'Normal';
+        elEngTs.className = `text-xs ${ engT > 110 ? 'text-red-500' : engT > 100 ? 'text-amber-500' : 'text-red-500' }`;
+    }
+
+    // Temperatura transmisión
+    const transT = m.transmission_temperature ?? 0;
+    const elTransT = document.getElementById('modal-trans-temp');
+    if (elTransT) elTransT.textContent = transT.toFixed(1);
+    const elTransTs = document.getElementById('modal-trans-temp-status');
+    if (elTransTs) {
+        elTransTs.textContent = transT > 110 ? '⚠️ Alta' : 'Normal';
+        elTransTs.className = `text-xs ${ transT > 110 ? 'text-red-500' : 'text-blue-500' }`;
+    }
+
+    // JSON raw data
+    const elJson = document.getElementById('modal-json');
+    if (elJson) {
+        elJson.textContent = JSON.stringify({ vitals: v, mechanical: m, logistics: l }, null, 2);
+    }
+}
+
+// Cerrar telemetry modal
+document.getElementById('btn-close-modal')?.addEventListener('click', closeTelemetryModal);
+telemetryModal?.addEventListener('click', (e) => {
+    if (e.target === telemetryModal) closeTelemetryModal();
+});
+
+// Botones de tratamiento
+telemetryModal?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.modal-treatment-btn');
+    if (btn && currentTelemetryAmbId) {
+        const treatment = btn.dataset.treatment;
+        postJson('/api/incident/inject', {
+            ambulance_id: currentTelemetryAmbId,
+            category: 'vitals',
+            incident_type: treatment
+        }).then(() => addTerminalLog(`[TRATAMIENTO] ${treatment} aplicado a ${currentTelemetryAmbId}`));
+    }
+
+    const incBtn = e.target.closest('.modal-incident-btn');
+    if (incBtn && currentTelemetryAmbId) {
+        const category = incBtn.dataset.category;
+        const incident = incBtn.dataset.incident;
+        postJson('/api/incident/inject', {
+            ambulance_id: currentTelemetryAmbId,
+            category,
+            incident_type: incident
+        }).then(() => addTerminalLog(`[INCIDENTE] ${incident} inyectado en ${currentTelemetryAmbId}`));
+    }
+});
+
+// Botones de mantenimiento
+document.getElementById('modal-refuel-btn')?.addEventListener('click', () => {
+    if (!currentTelemetryAmbId) return;
+    postJson('/api/ambulance/command', { ambulance_id: currentTelemetryAmbId, command: 'refuel' })
+        .then(() => addTerminalLog(`[ACCIÓN] ${currentTelemetryAmbId} enviada a repostar`));
+});
+document.getElementById('modal-maintenance-btn')?.addEventListener('click', () => {
+    if (!currentTelemetryAmbId) return;
+    postJson('/api/ambulance/command', { ambulance_id: currentTelemetryAmbId, command: 'maintenance' })
+        .then(() => addTerminalLog(`[ACCIÓN] ${currentTelemetryAmbId} enviada a mantenimiento`));
 });
 
 // -------------------------------------------------------------
@@ -1560,6 +1956,79 @@ document.addEventListener('DOMContentLoaded', () => {
     // Setup quick actions
     setupQuickActions();
     
+    // Populate preset selector (multi-select dropdown) from API
+    fetch('/api/presets')
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(data => {
+            if (!data.presets) return;
+            const panel = document.getElementById('preset-dropdown-panel');
+            if (!panel) return;
+            const FLAG_MAP = {
+                madrid: '\uD83C\uDDEA\uD83C\uDDF8',
+                barcelona: '\uD83C\uDDEA\uD83C\uDDF8',
+                sevilla: '\uD83C\uDDEA\uD83C\uDDF8',
+                valencia: '\uD83C\uDDEA\uD83C\uDDF8',
+                cdmx: '\uD83C\uDDF2\uD83C\uDDFD',
+                guadalajara: '\uD83C\uDDF2\uD83C\uDDFD',
+                monterrey: '\uD83C\uDDF2\uD83C\uDDFD',
+                bogota: '\uD83C\uDDE8\uD83C\uDDF4',
+                medellin: '\uD83C\uDDE8\uD83C\uDDF4',
+                cali: '\uD83C\uDDE8\uD83C\uDDF4',
+            };
+            panel.innerHTML = '';
+            Object.entries(data.presets).forEach(([key, info]) => {
+                const flag = FLAG_MAP[key] || '\uD83C\uDF0D';
+                const item = document.createElement('label');
+                item.dataset.key = key;
+                item.className = 'flex items-center gap-2 px-3 py-2 hover:bg-blue-50 cursor-pointer text-sm text-slate-700';
+                item.innerHTML = `
+                    <input type="checkbox" value="${key}" class="preset-checkbox w-4 h-4 accent-blue-600 rounded">
+                    <span class="preset-name">${flag} ${info.name}</span>
+                    <span class="ml-auto text-xs text-slate-400">${info.ambulances} 🚑 · ${info.hospitals} 🏥</span>
+                `;
+                item.querySelector('input').addEventListener('change', (ev) => {
+                    if (ev.target.checked) selectedPresets.add(key); else selectedPresets.delete(key);
+                    updatePresetDropdownLabel();
+                });
+                panel.appendChild(item);
+            });
+        })
+        .catch(() => {
+            // Fallback static option
+            const panel = document.getElementById('preset-dropdown-panel');
+            if (panel && panel.children.length === 0) {
+                const item = document.createElement('label');
+                item.dataset.key = 'madrid';
+                item.className = 'flex items-center gap-2 px-3 py-2 hover:bg-blue-50 cursor-pointer text-sm text-slate-700';
+                item.innerHTML = '<input type="checkbox" value="madrid" class="preset-checkbox w-4 h-4 accent-blue-600 rounded"><span class="preset-name">\uD83C\uDDEA\uD83C\uDDF8 Madrid</span>';
+                item.querySelector('input').addEventListener('change', (ev) => {
+                    if (ev.target.checked) selectedPresets.add('madrid'); else selectedPresets.delete('madrid');
+                    updatePresetDropdownLabel();
+                });
+                panel.appendChild(item);
+            }
+        });
+
+    // Toggle dropdown open/close
+    const ddToggle = document.getElementById('preset-dropdown-toggle');
+    const ddPanel = document.getElementById('preset-dropdown-panel');
+    const ddArrow = document.getElementById('preset-dropdown-arrow');
+    if (ddToggle && ddPanel) {
+        ddToggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = !ddPanel.classList.contains('hidden');
+            ddPanel.classList.toggle('hidden', isOpen);
+            ddArrow?.classList.toggle('rotate-180', !isOpen);
+        });
+        // Close when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!document.getElementById('preset-dropdown-container')?.contains(e.target)) {
+                ddPanel.classList.add('hidden');
+                ddArrow?.classList.remove('rotate-180');
+            }
+        });
+    }
+
     // Add initial log
     addTerminalLog('[SISTEMA] Centro de Control Digital Twin inicializado');
     addTerminalLog('[SISTEMA] Esperando conexión con servidor...');

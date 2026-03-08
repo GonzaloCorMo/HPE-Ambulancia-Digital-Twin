@@ -140,6 +140,15 @@ function updateMap() {
         } else if (ms === "MAINTENANCE") {
             colorClass = 'marker-amb-maintenance';
             markerText = '🔧';
+        } else if (ms === "STRANDED") {
+            colorClass = 'marker-amb-stranded';
+            markerText = '🪴';
+        }
+
+        // Alerta IA: si el predictor detecta anomalia, sobrescribir apariencia del marcador
+        if (amb.ai_prediction && amb.ai_prediction.anomaly === true) {
+            colorClass = 'marker-amb-anomaly';
+            markerText = '⚠️';
         }
 
         const html = `<div class="${colorClass} w-full h-full rounded-full flex items-center justify-center text-[10px] font-bold text-white shadow-lg">${markerText}</div>`;
@@ -219,38 +228,52 @@ function updateMap() {
                 if (routeCache[destKey]) {
                     markerRefs.ambulances[id]._routeCoords = routeCache[destKey];
                 } else {
+                    const fetchDestKey = destKey; // capturar para el closure
                     fetch(`/api/route/${id}`)
                         .then(r => r.json())
                         .then(data => {
                             if (data.route && data.route.length > 0) {
                                 const coords = data.route;
-                                routeCache[destKey] = coords;
-                                if (markerRefs.ambulances[id]._currentDestKey === destKey) {
+                                routeCache[fetchDestKey] = coords;
+                                // Validar que el destino no cambio durante el fetch
+                                if (markerRefs.ambulances[id] &&
+                                    markerRefs.ambulances[id]._currentDestKey === fetchDestKey) {
                                     markerRefs.ambulances[id]._routeCoords = coords;
                                 }
                             }
-                        }).catch(e => console.error("Offline Route Error:", e));
+                        }).catch(() => { /* Fallo silencioso: normal al cambiar de destino */ });
                 }
             }
 
             // Continuous Frame Update: Slice coordinates by `route_step` to simulate vanishing path
-            if (markerRefs.ambulances[id]._routeCoords) {
-                const step = amb.logistics.route_step || 0;
-                let sliced = markerRefs.ambulances[id]._routeCoords.slice(step);
+            const rawCoords = markerRefs.ambulances[id]._routeCoords;
+            if (rawCoords) {
+                // Proteccion defensiva: validar integridad del array de coordenadas
+                if (!Array.isArray(rawCoords)) {
+                    markerRefs.ambulances[id]._routeCoords = null;
+                } else {
+                    const step = amb.logistics.route_step || 0;
+                    let sliced = rawCoords.slice(step);
+                    // Filtrar pares de coordenadas malformados
+                    sliced = sliced.filter(c =>
+                        Array.isArray(c) && c.length >= 2 &&
+                        c[0] != null && c[1] != null &&
+                        isFinite(c[0]) && isFinite(c[1])
+                    );
+                    if (sliced.length > 0) {
+                        let latlngs = sliced.map(c => [c[0], c[1]]);
+                        latlngs.unshift([lat, lon]); // Hook visually to the current ambulance position
 
-                if (sliced.length > 0) {
-                    let latlngs = sliced.map(c => [c[0], c[1]]);
-                    latlngs.unshift([lat, lon]); // Hook visually to the current ambulance position
-
-                    if (activeRoutes[id]) {
-                        activeRoutes[id].setLatLngs(latlngs);
-                        activeRoutes[id].setStyle(styleObj);
-                    } else {
-                        activeRoutes[id] = L.polyline(latlngs, styleObj).addTo(map);
+                        if (activeRoutes[id]) {
+                            activeRoutes[id].setLatLngs(latlngs);
+                            activeRoutes[id].setStyle(styleObj);
+                        } else {
+                            activeRoutes[id] = L.polyline(latlngs, styleObj).addTo(map);
+                        }
+                    } else if (activeRoutes[id]) {
+                        map.removeLayer(activeRoutes[id]);
+                        delete activeRoutes[id];
                     }
-                } else if (activeRoutes[id]) {
-                    map.removeLayer(activeRoutes[id]);
-                    delete activeRoutes[id];
                 }
             }
 
@@ -507,17 +530,32 @@ setInterval(() => {
     }
 }, 10000);
 
+// Buffer para agrupacion de logs — evita escrituras DOM a 10 Hz y bloqueo del navegador
+const _logBuffer = [];
+let _logFlushScheduled = false;
+
 function addTerminalLog(message) {
     if (!terminalLogs) return;
-    
-    const t = formatTime(new Date());
-    terminalLogs.textContent += `[${t}] ${message}\n`;
-    terminalLogs.scrollTop = terminalLogs.scrollHeight;
 
-    // Prevent giant memory consumption
-    if (terminalLogs.textContent.length > 10000) {
-        terminalLogs.textContent = terminalLogs.textContent.substring(5000);
-    }
+    const t = formatTime(new Date());
+    _logBuffer.push(`[${t}] ${message}`);
+
+    if (_logFlushScheduled) return; // Ya hay un flush programado en el proximo frame
+    _logFlushScheduled = true;
+
+    requestAnimationFrame(() => {
+        _logFlushScheduled = false;
+        if (!terminalLogs || _logBuffer.length === 0) return;
+
+        terminalLogs.textContent += _logBuffer.join('\n') + '\n';
+        _logBuffer.length = 0; // Vaciar buffer
+        terminalLogs.scrollTop = terminalLogs.scrollHeight;
+
+        // Prevenir consumo excesivo de memoria
+        if (terminalLogs.textContent.length > 10000) {
+            terminalLogs.textContent = terminalLogs.textContent.substring(5000);
+        }
+    });
 }
 
 function updateAllStats(state) {
@@ -669,21 +707,18 @@ function updateStatistics(state) {
 
 function updateFleetUI() {
     if (!fleetContainer) return;
-    
+
     // Collect existing keys to remove dead ones, and add/update others
     const currentDomIds = Array.from(fleetContainer.children)
         .map(c => c.dataset.amId)
         .filter(id => id); // Filter out undefined
-    
+
     const stateAmIds = Object.keys(simState.ambulances);
 
     // Remove placeholder if there are ambulances (placeholder has no data-amId)
     if (stateAmIds.length > 0) {
-        // Find and remove any placeholder elements (no data-amId)
         Array.from(fleetContainer.children).forEach(child => {
-            if (!child.dataset.amId) {
-                child.remove();
-            }
+            if (!child.dataset.amId) child.remove();
         });
     }
 
@@ -697,17 +732,17 @@ function updateFleetUI() {
     stateAmIds.forEach(amId => {
         const amb = simState.ambulances[amId];
         if (!amb) return;
-        
+
         const v = amb.vitals || {};
         const m = amb.mechanical || {};
         const l = amb.logistics || {};
 
         const ms = l.mission_status || "ACTIVE";
         const hasPatient = v.has_patient || false;
-        
+
         let colorTitle = 'text-emerald-500';
         let statusBadge = '🟢 ACTIVA';
-        
+
         if (ms === "IN_USE") {
             colorTitle = 'text-blue-500';
             statusBadge = hasPatient ? '🏥 TRANSPORTE' : '🚨 EN CAMINO';
@@ -720,20 +755,49 @@ function updateFleetUI() {
         } else if (ms === "MAINTENANCE") {
             colorTitle = 'text-red-500';
             statusBadge = '🔧 MANTENIMIENTO';
+        } else if (ms === "STRANDED") {
+            colorTitle = 'text-orange-600';
+            statusBadge = '🪴 VARADA';
         }
+
+        // Safe optional-chaining check — avoids crash when ai_prediction is null/undefined
+        const aiAnomaly = amb.ai_prediction?.anomaly === true;
+
+        // RUL — Vida Útil Restante del motor
+        const rul = amb.ai_prediction?.rul || null;
+        const rulLevel = rul?.alert_level || 'NORMAL';
+        const rulColorClass = rulLevel === 'CRÍTICO'   ? 'text-red-500'
+                            : rulLevel === 'ALERTA'    ? 'text-orange-500'
+                            : rulLevel === 'PRECAUCIÓN' ? 'text-yellow-500'
+                            : 'text-slate-400';
+        const rulText = rul ? `${rul.hours_remaining}h (${rul.alert_level})` : '— h (N/A)';
+
+        // Card border class — recomputed each tick so anomaly state is always reflected
+        const cardBase = 'relative p-3 rounded-lg border cursor-pointer hover:shadow-md transition-all bg-white';
+        const cardCls = aiAnomaly
+            ? `${cardBase} border-red-500 animate-pulse`
+            : `${cardBase} border-slate-200 hover:border-blue-300`;
+
+        // AI badge class — absolute top-right so it never disturbs the header flex or telemetry grid
+        const aiAlertCls = aiAnomaly
+            ? 'ai-alert absolute top-1 right-1 text-xs font-bold px-1.5 py-0.5 rounded bg-red-100 text-red-700 animate-pulse z-10'
+            : 'ai-alert hidden';
 
         let card = document.getElementById(`card-${amId}`);
         if (!card) {
-            // Create
+            // ── CREATE ──────────────────────────────────────────────────────────
             card = document.createElement('div');
             card.id = `card-${amId}`;
             card.dataset.amId = amId;
-            card.className = "p-3 rounded-lg border cursor-pointer hover:shadow-md transition-shadow bg-white border-slate-200 hover:border-blue-300";
+            card.className = cardCls;
 
             card.innerHTML = `
-                <div class="flex items-center justify-between mb-2">
+                <span class="${aiAlertCls}">⚠️ FALLO PREVISTO</span>
+                <div class="flex items-center justify-between mb-2 flex-wrap gap-1">
                     <span class="font-bold cursor-pointer hover:underline text-lg uppercase title-tag ${colorTitle}">🚑 ${amId}</span>
-                    <span class="text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}">${statusBadge}</span>
+                    <div class="flex items-center gap-1">
+                        <span class="status-badge text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}">${statusBadge}</span>
+                    </div>
                 </div>
                 <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
                     <div class="text-blue-600 truncate tag-vit">
@@ -748,12 +812,15 @@ function updateFleetUI() {
                     <div class="text-amber-600 truncate tag-net">
                         <span class="font-semibold">Destino:</span> ${l.destination_type || 'NONE'}
                     </div>
+                    <div class="col-span-2 truncate tag-rul ${rulColorClass}">
+                        <span class="font-semibold">🔧 RUL Motor:</span> ${rulText}
+                    </div>
                 </div>
-                <div class="mt-2 text-xs text-slate-500 truncate">
+                <div class="mt-2 text-xs text-slate-500 truncate action-msg">
                     ${l.action_message || "Esperando órdenes"}
                 </div>
             `;
-            
+
             // Modal hooking
             const titleEl = card.querySelector('.title-tag');
             if (titleEl) {
@@ -762,51 +829,62 @@ function updateFleetUI() {
                     openAmbulanceDetails(amId);
                 });
             }
-            
+
             // Card click for quick actions
             card.addEventListener('click', (e) => {
                 if (!e.target.closest('.title-tag')) {
                     openAmbulanceDetails(amId);
                 }
             });
-            
+
             fleetContainer.appendChild(card);
         } else {
-            // Update Title color and status
+            // ── UPDATE ──────────────────────────────────────────────────────────
+            // Always sync card border so anomaly activation/deactivation is visible
+            card.className = cardCls;
+
+            // Title color
             const titleEl = card.querySelector('.title-tag');
             if (titleEl) {
                 titleEl.className = `font-bold cursor-pointer hover:underline text-lg uppercase title-tag ${colorTitle}`;
             }
-            
-            // Update status badge
-            const statusEl = card.querySelector('.text-xs.font-bold');
+
+            // Status badge
+            const statusEl = card.querySelector('.status-badge');
             if (statusEl) {
                 statusEl.textContent = statusBadge;
-                statusEl.className = `text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}`;
+                statusEl.className = `status-badge text-xs font-bold px-2 py-1 rounded-full ${colorTitle.replace('text-', 'bg-').replace('500', '100')} ${colorTitle}`;
             }
 
-            // Update strings
-            const tagVit = card.querySelector('.tag-vit');
+            // AI anomaly badge — replace full className to avoid stale animate-pulse
+            const aiAlertEl = card.querySelector('.ai-alert');
+            if (aiAlertEl) aiAlertEl.className = aiAlertCls;
+
+            // Telemetry fields
+            const tagVit  = card.querySelector('.tag-vit');
             const tagMech = card.querySelector('.tag-mech');
-            const tagLog = card.querySelector('.tag-log');
-            const tagNet = card.querySelector('.tag-net');
-            
-            if (tagVit) tagVit.innerHTML = `<span class="font-semibold">Paciente:</span> ${hasPatient ? 'CRÍTICO' : 'NO'}`;
+            const tagLog  = card.querySelector('.tag-log');
+            const tagNet  = card.querySelector('.tag-net');
+
+            if (tagVit)  tagVit.innerHTML  = `<span class="font-semibold">Paciente:</span> ${hasPatient ? 'CRÍTICO' : 'NO'}`;
             if (tagMech) tagMech.innerHTML = `<span class="font-semibold">Combustible:</span> ${m.fuel_level || 0}%`;
-            if (tagLog) tagLog.innerHTML = `<span class="font-semibold">Velocidad:</span> ${Math.round(l.speed || 0)} km/h`;
-            if (tagNet) tagNet.innerHTML = `<span class="font-semibold">Destino:</span> ${l.destination_type || 'NONE'}`;
-            
-            // Update action message
-            const actionEl = card.querySelector('.mt-2.text-xs.text-slate-500');
-            if (actionEl) {
-                actionEl.textContent = l.action_message || "Esperando órdenes";
+            if (tagLog)  tagLog.innerHTML  = `<span class="font-semibold">Velocidad:</span> ${Math.round(l.speed || 0)} km/h`;
+            if (tagNet)  tagNet.innerHTML  = `<span class="font-semibold">Destino:</span> ${l.destination_type || 'NONE'}`;
+
+            const tagRul = card.querySelector('.tag-rul');
+            if (tagRul) {
+                tagRul.className = `col-span-2 truncate tag-rul ${rulColorClass}`;
+                tagRul.innerHTML = `<span class="font-semibold">🔧 RUL Motor:</span> ${rulText}`;
             }
+
+            // Action message — uses stable .action-msg class
+            const actionEl = card.querySelector('.action-msg');
+            if (actionEl) actionEl.textContent = l.action_message || "Esperando órdenes";
         }
     });
-    
-    // Show placeholder if no ambulances and no placeholder already exists
+
+    // Show placeholder if no ambulances
     if (stateAmIds.length === 0) {
-        // Check if placeholder already exists (any child without data-amId)
         const hasPlaceholder = Array.from(fleetContainer.children).some(child => !child.dataset.amId);
         if (!hasPlaceholder) {
             fleetContainer.innerHTML = `
@@ -944,18 +1022,27 @@ function focusEmergency(emergencyId) {
 // -------------------------------------------------------------
 // Controls & API REST Calls
 // -------------------------------------------------------------
-function postJson(url, data) {
-    return fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data)
-    })
-    .then(response => response.json())
-    .catch(e => {
-        console.error(`Error on ${url}:`, e);
-        addTerminalLog(`[ERROR] Fallo en petición a ${url}: ${e.message}`);
-        return { error: e.message };
-    });
+async function postJson(url, data) {
+    let response;
+    try {
+        response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data)
+        });
+    } catch (e) {
+        console.error(`Network error on ${url}:`, e);
+        addTerminalLog(`[ERROR] Fallo de red en ${url}: ${e.message}`);
+        throw e;
+    }
+    if (!response.ok) {
+        let detail = response.statusText;
+        try { const body = await response.json(); detail = body.detail || detail; } catch (_) {}
+        console.error(`HTTP ${response.status} on ${url}:`, detail);
+        addTerminalLog(`[ERROR] Error ${response.status} en ${url}: ${detail}`);
+        throw new Error(detail);
+    }
+    return response.json();
 }
 
 if (btnPlay) {
@@ -972,6 +1059,59 @@ if (btnClear) {
             postJson('/api/control/clear', {}); 
             addTerminalLog('[CONTROL] Limpiando escenario...');
         }
+    });
+}
+
+const btnAutoSim = document.getElementById('btn-auto-sim');
+if (btnAutoSim) {
+    btnAutoSim.addEventListener('click', () => {
+        if (!confirm('¿Iniciar simulación autónoma?\n\nSe generarán emergencias y atascos de forma automática.\nRequiere hospitales y ambulancias en el mapa.\n\nSi no has cargado un escenario, selecciona un preset primero.')) return;
+        btnAutoSim.disabled = true;
+        btnAutoSim.textContent = '⏳ Iniciando...';
+        addTerminalLog('[AUTO-SIM] Solicitando simulación autónoma al servidor...');
+        postJson('/api/auto_simulation', {})
+            .then(data => {
+                if (data.status === 'started') {
+                    addTerminalLog('[AUTO-SIM] 🤖 Simulación autónoma iniciada.');
+                    if (data.message) addTerminalLog(`[AUTO-SIM] ${data.message}`);
+                }
+            })
+            .catch(e => {
+                addTerminalLog(`[ERROR] No se pudo iniciar la simulación autónoma: ${e.message}`);
+            })
+            .finally(() => {
+                btnAutoSim.disabled = false;
+                btnAutoSim.innerHTML = '<i class="fas fa-robot"></i><span>🤖 SIMULACIÓN AUTÓNOMA</span>';
+            });
+    });
+}
+
+// Preset loader
+const btnLoadPreset = document.getElementById('btn-load-preset');
+const presetSelector = document.getElementById('preset-selector');
+if (btnLoadPreset && presetSelector) {
+    btnLoadPreset.addEventListener('click', () => {
+        const presetName = presetSelector.value;
+        if (!presetName) {
+            addTerminalLog('[SISTEMA] Selecciona un preset del desplegable.');
+            return;
+        }
+        if (!confirm(`¿Cargar preset "${presetName}"?\n\nSe limpiará el escenario actual y se cargará la infraestructura del preset.`)) return;
+        btnLoadPreset.disabled = true;
+        addTerminalLog(`[PRESET] Cargando preset "${presetName}"...`);
+        postJson('/api/preset', { name: presetName })
+            .then(data => {
+                if (data.status === 'loaded') {
+                    addTerminalLog(`[PRESET] ✅ ${data.message}`);
+                    if (data.ambulances) addTerminalLog(`[PRESET] ${data.ambulances} ambulancias desplegadas.`);
+                }
+            })
+            .catch(e => {
+                addTerminalLog(`[ERROR] No se pudo cargar el preset: ${e.message}`);
+            })
+            .finally(() => {
+                btnLoadPreset.disabled = false;
+            });
     });
 }
 

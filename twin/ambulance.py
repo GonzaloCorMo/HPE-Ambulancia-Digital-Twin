@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional, Callable
 from telemetry.mechanical import MechanicalEngine
 from telemetry.vitals import VitalsEngine, PatientStatus
 from telemetry.logistics import LogisticsEngine
+from telemetry.ai_predictor import predictor as ai_predictor, rul_predictor
 
 class AmbulanceTwin:
     """
@@ -50,6 +51,14 @@ class AmbulanceTwin:
         self.last_https_sync = time.time()
         self.communication_errors = 0
         self.operational_hours = 0.0
+
+        # IA: detector de anomalías mecánicas
+        self.ai_anomaly_detected: bool = False
+
+        # Flag de repostaje pendiente — seteado por engine.py, consumido por _manage_fuel_and_maintenance
+        # Desacopla la detección de llegada a gasolinera del campo destination_type (que logistics.py
+        # borra atómicamente en _arrive_at_destination antes de que el twin pueda leerlo).
+        self.refuel_pending: bool = False
         
         # Configurar logger
         self.logger = logging.getLogger(f"AmbulanceTwin.{self.id}")
@@ -121,6 +130,13 @@ class AmbulanceTwin:
                 )
                 vit_state = self.vitals.step(dt=1.0)
                 
+                # 4.5. Predicción IA de anomalías mecánicas
+                ai_result = ai_predictor.predict_failure(mech_state)
+                self.ai_anomaly_detected = ai_result.get("anomaly", False)
+
+                # 4.6. Predicción de Vida Útil Restante (RUL) del motor
+                rul_result = rul_predictor.predict_rul(mech_state)
+
                 # 5. Agregar estado completo
                 self.current_state = {
                     "ambulance_id": self.id,
@@ -129,6 +145,7 @@ class AmbulanceTwin:
                     "mechanical": mech_state,
                     "vitals": vit_state,
                     "logistics": log_state,
+                    "ai_prediction": {**ai_result, "rul": rul_result},
                     "communication_status": self._get_communication_status()
                 }
                 
@@ -148,27 +165,24 @@ class AmbulanceTwin:
     def _manage_fuel_and_maintenance(self, distance_km: float) -> None:
         """
         Gestiona automáticamente combustible, repostaje y mantenimiento.
+
+        La decisión de iniciar repostaje está centralizada en engine.py
+        (_manage_proactive_refueling), que setea self.refuel_pending = True y
+        enruta la ambulancia a la gasolinera más cercana. Este método sólo
+        gestiona la transición de llegada → is_refueling y la finalización.
         
         Args:
             distance_km: Distancia recorrida en el último paso
         """
-        # Lógica de repostaje automático
-        if (self.mechanical.fuel_level < 40.0 and 
-            not self.mechanical.is_refueling and 
-            self.logistics.mission_status == "ACTIVE"):
-            
-            self.logistics.mission_status = "INACTIVE"
-            self.logistics.route_to_nearest("GAS_STATION")
-            self.logistics.action_message = "Enrutando a Gasolinera"
-            self.log_callback(f"[{self.id}] ⛽ Combustible bajo ({self.mechanical.fuel_level:.1f}%). Enrutando a repostaje.")
-        
-        # Llegada a gasolinera
-        if (self.logistics.destination is None and 
-            self.logistics.destination_type == "GAS_STATION" and 
+        # Llegada a gasolinera — usa refuel_pending en lugar de destination_type
+        # para evitar la condición de carrera con logistics._arrive_at_destination(),
+        # que borra destination_type antes de que este método pueda leerlo.
+        if (self.logistics.destination is None and
+            self.refuel_pending and
             self.logistics.mission_status == "INACTIVE"):
-            
+
             self.mechanical.is_refueling = True
-            self.logistics.destination_type = None
+            self.refuel_pending = False          # consumir el flag
             self.logistics.action_message = "Repostando (Bomba conectada)"
         
         # Finalización de repostaje - exactamente 100%
@@ -186,12 +200,12 @@ class AmbulanceTwin:
             
             self.log_callback(f"[{self.id}] 🔧 Requiere mantenimiento programado ({self.mechanical.engine_hours:.1f}h).")
         
-        # Parada por falta de combustible
+        # Parada por agotamiento total de combustible → estado STRANDED
         if self.mechanical.fuel_level <= 0.0:
             self.logistics.speed = 0.0
             self.logistics.acceleration = 0.0
-            self.logistics.mission_status = "INACTIVE"
-            self.logistics.action_message = "Averiada (Sin combustible)"
+            self.logistics.mission_status = "STRANDED"
+            self.logistics.action_message = "VARADA — Sin combustible"
             self.mechanical.engine_on = False
 
     def _get_communication_status(self) -> Dict[str, Any]:
@@ -354,7 +368,14 @@ class AmbulanceTwin:
         try:
             if hasattr(self.mechanical, 'perform_maintenance'):
                 self.mechanical.perform_maintenance()
-                self.log_callback(f"[{self.id}] 🔧 Mantenimiento completo realizado")
+                # Restaurar estado operativo completo (incluyendo posibles averías)
+                self.mechanical.broken = False
+                self.mechanical.engine_on = True
+                self.logistics.mission_status = "ACTIVE"
+                self.logistics.action_message = "Mantenimiento completado — Unidad operativa"
+                self.log_callback(
+                    f"[{self.id}] ✅ Mantenimiento completo realizado. Unidad restaurada al servicio."
+                )
                 return True
             return False
         except Exception as e:

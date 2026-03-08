@@ -94,6 +94,23 @@
     animation: pulse-red 2s infinite;
 }
 
+/* Ambulancia varada (sin combustible) */
+.marker-amb-stranded {
+    background-color: #ea580c;
+    border: 2px solid white;
+    box-shadow: 0 0 12px rgba(234, 88, 12, 0.7);
+    animation: pulse-orange 2s infinite;
+}
+
+/* Anomalia IA detectada: pulso alternante rojo / amarillo intenso */
+.marker-amb-anomaly {
+    background-color: #dc2626;
+    border: 3px solid #fbbf24;
+    box-shadow: 0 0 20px rgba(220, 38, 38, 0.9);
+    animation: anomaly-pulse 0.8s ease-in-out infinite;
+    z-index: 1100 !important;
+}
+
 /* POI Markers */
 .marker-poi-hospital {
     background-color: #10b981;
@@ -228,6 +245,37 @@
     }
     50% {
         box-shadow: 0 0 25px rgba(139, 92, 246, 1);
+    }
+}
+
+@keyframes pulse-orange {
+    0%, 100% {
+        box-shadow: 0 0 12px rgba(234, 88, 12, 0.7);
+    }
+    50% {
+        box-shadow: 0 0 22px rgba(234, 88, 12, 1);
+    }
+}
+
+/* Pulso de anomalia IA: alterna entre rojo intenso y amarillo para maximo contraste visual */
+@keyframes anomaly-pulse {
+    0% {
+        background-color: #dc2626;
+        border-color: #fbbf24;
+        box-shadow: 0 0 20px rgba(220, 38, 38, 0.9), 0 0 40px rgba(220, 38, 38, 0.4);
+        transform: scale(1);
+    }
+    50% {
+        background-color: #fbbf24;
+        border-color: #dc2626;
+        box-shadow: 0 0 28px rgba(251, 191, 36, 1), 0 0 50px rgba(251, 191, 36, 0.5);
+        transform: scale(1.15);
+    }
+    100% {
+        background-color: #dc2626;
+        border-color: #fbbf24;
+        box-shadow: 0 0 20px rgba(220, 38, 38, 0.9), 0 0 40px rgba(220, 38, 38, 0.4);
+        transform: scale(1);
     }
 }
 
